@@ -1,9 +1,10 @@
 """
-VR3D Studio - Modern Graphical User Interface
-Built with CustomTkinter. Multi-threaded with live preview, video timeline scrubber,
-interactive 3D view tabs, and hardware status monitor.
+VR3D Studio - Graphical User Interface
+Built with CustomTkinter. Multi-threaded live preview, video timeline scrubber,
+switchable 3D preview views, and persistent settings.
 """
 
+import json
 import os
 import sys
 import threading
@@ -14,349 +15,503 @@ import cv2
 import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageTk
-import webbrowser
 
 # Setup paths
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from core.io_utils import imread_safe, imwrite_safe
-from core.depth_estimator import DepthEstimator, MODEL_CONFIGS
+from core.io_utils import imread_safe
+from core.depth_estimator import DepthEstimator
 from core.stereo_warper import StereoWarper
 from core.vr180_projector import VR180Projector
 from core.video_processor import VideoProcessor
 
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".vr3d_studio.json")
+
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+# VR headset naming suffixes (Pico, Quest, Skybox VR auto-detection)
+SUFFIX_MAP = {
+    "vr180": "_180_SBS",
+    "sbs_full": "_3DH_SBS",
+    "sbs_half": "_3DH_Half_SBS",
+    "anaglyph": "_3D_Anaglyph",
+    "depth_only": "_Depth",
+}
+
+MODELS = {
+    "Hybrid fusion (Depth Anything + Marigold)": "hybrid",
+    "Depth Anything V2 Small (fastest)": "vits",
+    "Depth Anything V2 Base (balanced)": "vitb",
+    "Depth Anything V2 Large (best quality)": "vitl",
+    "Marigold LCM (diffusion depth)": "marigold",
+}
+
+MODES = {
+    "VR180 3D (Quest / Pico headsets)": "vr180",
+    "Full SBS 3D (3D TV / monitor)": "sbs_full",
+    "Half SBS 3D (half width)": "sbs_half",
+    "Anaglyph (red / cyan glasses)": "anaglyph",
+    "Depth map only": "depth_only",
+}
+
+# name -> (strength / ipd, focus / convergence)
+PROFILES = {
+    "Soft - relaxed (2.0%)": (0.020, 0.50),
+    "Natural - comfortable (3.5%)": (0.035, 0.50),
+    "Deep - dynamic (5.0%)": (0.050, 0.35),
+    "Pop-out - leaps off screen (6.5%)": (0.065, 0.15),
+    "Extreme (8.0%)": (0.080, 0.10),
+}
+
+# (internal key, button label)
+VIEWS = [
+    ("wiggle", "Wiggle 3D"),
+    ("sbs", "SBS"),
+    ("vr180", "VR180"),
+    ("anaglyph", "Anaglyph"),
+    ("depth", "Depth"),
+    ("left", "Left eye"),
+    ("right", "Right eye"),
+    ("original", "Original"),
+]
+VIEW_LABELS = {k: v for k, v in VIEWS}
+VIEW_KEYS = {v: k for k, v in VIEWS}
+
+# Palette: (light, dark) tuples follow the appearance mode automatically
+ACCENT = ("#5B5BD6", "#7C7CF0")
+ACCENT_HOVER = ("#4A4AC4", "#6868DE")
+GO = ("#1F9D6B", "#23B47A")
+GO_HOVER = ("#1A8A5D", "#1E9C6A")
+DANGER = ("#D64545", "#E05A5A")
+DANGER_HOVER = ("#BF3B3B", "#C94C4C")
+SUBTLE = ("#E4E6EE", "#2A2D3A")
+SUBTLE_HOVER = ("#D5D8E3", "#343849")
+CARD = ("#F4F5F9", "#1D1F29")
+SIDEBAR = ("#FFFFFF", "#15161E")
+MAIN_BG = ("#EBEDF3", "#0F1016")
+MUTED = ("#6B7080", "#8B90A3")
+TEXT = ("#1B1D26", "#E8E9F0")
+PREVIEW_BG = "#0B0C10"
+
+DEFAULTS = {
+    "model": "vits",
+    "mode": "vr180",
+    "profile": "Natural - comfortable (3.5%)",
+    "ipd": 0.035,
+    "conv": 0.50,
+    "fov": 110.0,
+    "auto_conv": True,
+    "swap": False,
+    "temporal": True,
+    "nvenc": True,
+    "appearance": "Dark",
+}
+
+
+def load_settings() -> dict:
+    settings = dict(DEFAULTS)
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
+            saved = json.load(fh)
+        settings.update({k: v for k, v in saved.items() if k in DEFAULTS})
+    except (OSError, ValueError):
+        pass
+    # Drop stale values that no longer match an option
+    if settings["model"] not in MODELS.values():
+        settings["model"] = DEFAULTS["model"]
+    if settings["mode"] not in MODES.values():
+        settings["mode"] = DEFAULTS["mode"]
+    if settings["profile"] not in PROFILES:
+        settings["profile"] = DEFAULTS["profile"]
+    if settings["appearance"] not in ("Dark", "Light", "System"):
+        settings["appearance"] = DEFAULTS["appearance"]
+    return settings
+
+
+def label_for(mapping: dict, value) -> str:
+    return next(k for k, v in mapping.items() if v == value)
 
 
 class VR3DStudioApp(ctk.CTk):
     def __init__(self):
+        self.settings = load_settings()
+        ctk.set_appearance_mode(self.settings["appearance"])
+        ctk.set_default_color_theme("blue")
         super().__init__()
 
-        self.title("VR3D Studio - 2D to 3D SBS & VR180 AI Converter (RTX 5070 Edition)")
-        self.geometry("1280x820")
-        self.minsize(1050, 700)
+        self.title("VR3D Studio - 2D to 3D SBS & VR180 Converter")
+        self.geometry("1280x800")
+        self.minsize(980, 640)
+        self.configure(fg_color=MAIN_BG)
 
         # Core engines
         self.depth_estimator = None
         self.stereo_warper = StereoWarper()
         self.video_processor = None
 
-        # State variables
+        # State
         self.input_file_path = ""
         self.output_file_path = ""
         self.is_video = False
         self.is_folder = False
         self.album_files = []
         self.total_video_frames = 0
+        self.video_fps = 30.0
         self.current_frame_bgr = None
         self.cached_depth = None
         self.cached_left = None
         self.cached_right = None
-        self.active_tab = "Wiggle 3D (Szemüveg nélkül)"
+        self.active_view = "wiggle"
         self.is_processing = False
         self.wiggle_eye = 0
         self.wiggle_job = None
+        self.preview_job = None
+        self.scrub_job = None
+        self.preview_busy = False
+        self.preview_again = False
 
         self._build_ui()
+        self._bind_shortcuts()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._init_backend_async()
 
+    # ==========================================
+    # Backend
+    # ==========================================
     def _init_backend_async(self):
-        """Initializes AI model in a background thread so UI starts immediately."""
-        self.status_label.configure(text="Állapot: Depth Anything V2 inicializálása (GPU betöltés)...")
+        """Loads the AI model in a background thread so the UI starts immediately."""
+        self._set_status("Loading depth model onto GPU...")
         threading.Thread(target=self._load_model_worker, daemon=True).start()
 
     def _load_model_worker(self):
         try:
-            model_key = self.MODEL_DISPLAY_MAP.get(self.model_var.get(), "vits")
+            model_key = MODELS.get(self.model_var.get(), "vits")
             self.depth_estimator = DepthEstimator(model_size=model_key)
             self.video_processor = VideoProcessor(self.depth_estimator, self.stereo_warper)
-            self.after(0, lambda: self.status_label.configure(text="Állapot: Kész. NVIDIA RTX 5070 CUDA aktív."))
+            gpu = self._detect_gpu()
+            self.after(0, lambda: self.hw_label.configure(text=gpu))
+            self.after(0, lambda: self._set_status("Ready."))
             self.after(0, self._on_settings_change)
         except Exception as exc:
             err_msg = str(exc)
             print(f"[Model load error] {err_msg}")
-            self.after(0, lambda msg=err_msg: self.status_label.configure(text=f"Modell hiba: {msg}"))
+            self.after(0, lambda msg=err_msg: self._set_status(f"Model error: {msg}"))
 
+    @staticmethod
+    def _detect_gpu() -> str:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return f"⚡ {torch.cuda.get_device_name(0)} · CUDA"
+        except Exception:
+            pass
+        return "CPU mode (no CUDA GPU found)"
+
+    # ==========================================
+    # UI construction
+    # ==========================================
     def _build_ui(self):
-        # Grid layout: 2 columns (Sidebar and Main Area)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        self._build_sidebar()
+        self._build_main()
 
-        # ==========================================
-        # 1. LEFT SIDEBAR: Controls & Settings
-        # ==========================================
-        sidebar = ctk.CTkScrollableFrame(self, width=340, corner_radius=0)
-        sidebar.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+    def _card(self, parent, title):
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12)
+        card.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(
+            card, text=title.upper(), font=ctk.CTkFont(size=11, weight="bold"), text_color=MUTED
+        ).pack(padx=12, pady=(10, 4), anchor="w")
+        return card
 
-        # Logo / Title
-        title_label = ctk.CTkLabel(
-            sidebar, text="VR3D STUDIO", font=ctk.CTkFont(size=20, weight="bold")
+    def _field_label(self, parent, text):
+        ctk.CTkLabel(parent, text=text, font=ctk.CTkFont(size=12), text_color=TEXT).pack(padx=12, anchor="w")
+
+    def _option_menu(self, parent, values, variable, command):
+        menu = ctk.CTkOptionMenu(
+            parent, values=values, variable=variable, command=command, height=30,
+            fg_color=SUBTLE, button_color=SUBTLE_HOVER, button_hover_color=ACCENT_HOVER,
+            text_color=TEXT, dynamic_resizing=False, corner_radius=8,
         )
-        title_label.pack(padx=15, pady=(15, 2), anchor="w")
-        subtitle = ctk.CTkLabel(
-            sidebar, text="2D -> 3D SBS & VR180 AI Converter", font=ctk.CTkFont(size=12), text_color="gray"
+        menu.pack(fill="x", padx=12, pady=(2, 8))
+        return menu
+
+    def _slider_row(self, parent, title, from_, to, steps, value, command):
+        """Title on the left, live value on the right, slider underneath."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(2, 8))
+        head = ctk.CTkFrame(row, fg_color="transparent")
+        head.pack(fill="x")
+        ctk.CTkLabel(head, text=title, font=ctk.CTkFont(size=12), text_color=TEXT).pack(side="left")
+        value_lbl = ctk.CTkLabel(head, text="", font=ctk.CTkFont(size=12, weight="bold"), text_color=ACCENT)
+        value_lbl.pack(side="right")
+        slider = ctk.CTkSlider(
+            row, from_=from_, to=to, number_of_steps=steps, command=command,
+            button_color=ACCENT, button_hover_color=ACCENT_HOVER, progress_color=ACCENT,
         )
-        subtitle.pack(padx=15, pady=(0, 15), anchor="w")
+        slider.set(value)
+        slider.pack(fill="x", pady=(2, 0))
+        return row, value_lbl, slider
 
-        # Hardware Badge
-        hw_frame = ctk.CTkFrame(sidebar, fg_color=("#2B2B2B", "#1F1F1F"), corner_radius=6)
-        hw_frame.pack(fill="x", padx=15, pady=(0, 15))
-        hw_label = ctk.CTkLabel(
-            hw_frame, text="⚡ NVIDIA RTX 5070 (12GB) • CUDA", font=ctk.CTkFont(size=11, weight="bold"), text_color="#2ECC71"
+    def _switch(self, parent, text, on, command=None):
+        sw = ctk.CTkSwitch(parent, text=text, font=ctk.CTkFont(size=12), text_color=TEXT,
+                           progress_color=ACCENT, command=command)
+        if on:
+            sw.select()
+        sw.pack(padx=12, pady=3, anchor="w")
+        return sw
+
+    def _build_sidebar(self):
+        s = self.settings
+        sidebar = ctk.CTkFrame(self, width=330, corner_radius=0, fg_color=SIDEBAR)
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_propagate(False)
+        sidebar.grid_rowconfigure(1, weight=1)
+        sidebar.grid_columnconfigure(0, weight=1)
+
+        # --- Header ---
+        header = ctk.CTkFrame(sidebar, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 10))
+        ctk.CTkLabel(header, text="VR3D Studio", font=ctk.CTkFont(size=22, weight="bold"),
+                     text_color=TEXT).pack(anchor="w")
+        ctk.CTkLabel(header, text="Turn 2D photos & videos into 3D / VR180",
+                     font=ctk.CTkFont(size=12), text_color=MUTED).pack(anchor="w")
+        self.hw_label = ctk.CTkLabel(
+            header, text="Detecting GPU...", font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=GO, fg_color=CARD, corner_radius=10, height=24,
         )
-        hw_label.pack(padx=10, pady=6)
+        self.hw_label.pack(anchor="w", pady=(8, 0), ipadx=8)
 
-        # --- File Selection ---
-        sec1 = ctk.CTkLabel(sidebar, text="1. FORRÁSFÁJL KIVÁLASZTÁSA", font=ctk.CTkFont(size=12, weight="bold"), text_color="#3498DB")
-        sec1.pack(padx=15, pady=(10, 5), anchor="w")
+        # --- Scrollable settings ---
+        body = ctk.CTkScrollableFrame(sidebar, fg_color="transparent", corner_radius=0)
+        body.grid(row=1, column=0, sticky="nsew", padx=4)
 
-        btn_browse_file = ctk.CTkButton(sidebar, text="📄 Egyedi fájl tallózása (Videó / Kép)", command=self._browse_input)
-        btn_browse_file.pack(fill="x", padx=15, pady=(5, 3))
-
-        btn_browse_folder = ctk.CTkButton(
-            sidebar, text="📁 Teljes Fotóalbum / Mappa tallózása",
-            fg_color="#8E44AD", hover_color="#732D91",
-            command=self._browse_folder
+        # Source
+        src = self._card(body, "1  Source")
+        btn_row = ctk.CTkFrame(src, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(2, 4))
+        btn_row.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkButton(
+            btn_row, text="Open file", height=32, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self._browse_input,
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ctk.CTkButton(
+            btn_row, text="Open folder", height=32, corner_radius=8,
+            fg_color=SUBTLE, hover_color=SUBTLE_HOVER, text_color=TEXT, command=self._browse_folder,
+        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self.lbl_input_path = ctk.CTkLabel(
+            src, text="No file selected  ·  Ctrl+O", text_color=MUTED, wraplength=270,
+            justify="left", font=ctk.CTkFont(size=11),
         )
-        btn_browse_folder.pack(fill="x", padx=15, pady=(3, 5))
+        self.lbl_input_path.pack(padx=12, pady=(0, 10), anchor="w")
 
-        self.lbl_input_path = ctk.CTkLabel(sidebar, text="Nincs fájl vagy mappa kiválasztva", text_color="gray", wraplength=300, font=ctk.CTkFont(size=11))
-        self.lbl_input_path.pack(padx=15, pady=(0, 10), anchor="w")
+        # Model & format
+        fmt = self._card(body, "2  Model & format")
+        self._field_label(fmt, "Depth model")
+        self.model_var = ctk.StringVar(value=label_for(MODELS, s["model"]))
+        self._option_menu(fmt, list(MODELS), self.model_var, self._on_model_changed)
+        self._field_label(fmt, "Output format")
+        self.mode_var = ctk.StringVar(value=label_for(MODES, s["mode"]))
+        self._option_menu(fmt, list(MODES), self.mode_var, self._on_mode_changed)
 
-        # --- 3D & VR Settings ---
-        sec2 = ctk.CTkLabel(sidebar, text="2. TÉRHATÁS ÉS VR BEÁLLÍTÁSOK", font=ctk.CTkFont(size=12, weight="bold"), text_color="#3498DB")
-        sec2.pack(padx=15, pady=(10, 5), anchor="w")
+        # 3D effect
+        fx = self._card(body, "3  3D effect")
+        self._field_label(fx, "Preset")
+        self.profile_var = ctk.StringVar(value=s["profile"])
+        self._option_menu(fx, list(PROFILES), self.profile_var, self._on_profile_changed)
+        _, self.lbl_ipd, self.slider_ipd = self._slider_row(
+            fx, "Depth strength", 0.010, 0.090, 80, s["ipd"], self._on_ipd_slide)
+        _, self.lbl_conv, self.slider_conv = self._slider_row(
+            fx, "Focus plane", 0.1, 0.9, 80, s["conv"], self._on_conv_slide)
+        self.chk_auto_conv = self._switch(fx, "Auto focus on subject", s["auto_conv"], self._on_stereo_toggle)
+        self.fov_row, self.lbl_fov, self.slider_fov = self._slider_row(
+            fx, "VR field of view", 80.0, 150.0, 70, s["fov"], self._on_fov_slide)
+        ctk.CTkFrame(fx, height=4, fg_color="transparent").pack()
+        self._fov_anchor = self.chk_auto_conv
 
-        # Display mapping dictionaries
-        self.MODEL_DISPLAY_MAP = {
-            "🔥 Hibrid Fúzió (Depth Anything + Marigold)": "hybrid",
-            "Depth Anything V2 (Kis / Villámgyors)": "vits",
-            "Depth Anything V2 (Közepes / Kiegyensúlyozott)": "vitb",
-            "Depth Anything V2 (Nagy / Csúcsminőség)": "vitl",
-            "Hugging Face: Marigold LCM (Diffúziós 3D)": "marigold"
-        }
-        self.MODEL_INTERNAL_MAP = {v: k for k, v in self.MODEL_DISPLAY_MAP.items()}
+        # Options
+        opts = self._card(body, "4  Options")
+        self.chk_swap_eyes = self._switch(opts, "Swap left / right eyes", s["swap"], self._on_stereo_toggle)
+        self.chk_temporal = self._switch(opts, "Anti-flicker smoothing (video)", s["temporal"])
+        self.chk_nvenc = self._switch(opts, "NVIDIA NVENC hardware encoding", s["nvenc"])
+        ctk.CTkFrame(opts, height=6, fg_color="transparent").pack()
 
-        self.MODE_DISPLAY_MAP = {
-            "VR180 3D (180° Sztereó SBS - Pico / Quest)": "vr180",
-            "Full SBS 3D (Normál képernyős 3D - Teljes szélesség)": "sbs_full",
-            "Half SBS 3D (Normál képernyős 3D - Felezett szélesség)": "sbs_half",
-            "Anaglif 3D (Piros-Cián szemüveges)": "anaglyph",
-            "Csak Mélységtérkép (Hőtérkép)": "depth_only"
-        }
-        self.MODE_INTERNAL_MAP = {v: k for k, v in self.MODE_DISPLAY_MAP.items()}
-
-        self.PROFILE_DISPLAY_MAP = {
-            "[1] Természetes 3D (Kényelmes, 3.5%)": (0.035, 0.50),
-            "[2] Mély Dinamikus 3D (Látványos, 5.0%)": (0.050, 0.35),
-            "[3] Pop-Out (Kilóg a képből! 6.5%)": (0.065, 0.15),
-            "[4] Extrém 3D Térhatás (8.0%)": (0.080, 0.10),
-            "[0] Lágy 3D (Pihentető, 2.0%)": (0.020, 0.50),
-        }
-
-        # Model Selector
-        ctk.CTkLabel(sidebar, text="AI Modell:", font=ctk.CTkFont(size=11, weight="bold")).pack(padx=15, anchor="w")
-        self.model_var = ctk.StringVar(value=list(self.MODEL_DISPLAY_MAP.keys())[0])
-        self.cmb_model = ctk.CTkOptionMenu(
-            sidebar,
-            values=list(self.MODEL_DISPLAY_MAP.keys()),
-            variable=self.model_var,
-            command=self._on_model_changed
+        # Appearance
+        look = self._card(body, "Appearance")
+        self.appearance_seg = ctk.CTkSegmentedButton(
+            look, values=["Dark", "Light", "System"], command=self._on_appearance_changed,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
         )
-        self.cmb_model.pack(fill="x", padx=15, pady=(2, 10))
+        self.appearance_seg.set(s["appearance"])
+        self.appearance_seg.pack(fill="x", padx=12, pady=(2, 12))
 
-        # Mode Selector
-        ctk.CTkLabel(sidebar, text="Kimeneti formátum:", font=ctk.CTkFont(size=11, weight="bold")).pack(padx=15, anchor="w")
-        self.mode_var = ctk.StringVar(value="VR180 3D (180° Sztereó SBS - Pico / Quest)")
-        self.cmb_mode = ctk.CTkOptionMenu(
-            sidebar,
-            values=list(self.MODE_DISPLAY_MAP.keys()),
-            variable=self.mode_var,
-            command=self._on_mode_changed
-        )
-        self.cmb_mode.pack(fill="x", padx=15, pady=(2, 10))
+        # Initialise value labels
+        self._on_ipd_slide(s["ipd"], refresh=False)
+        self._on_conv_slide(s["conv"], refresh=False)
+        self._on_fov_slide(s["fov"], refresh=False)
+        self._update_fov_visibility()
 
-        # 3D Profile Selector
-        ctk.CTkLabel(sidebar, text="3D Térhatás Karakter (Profil):", font=ctk.CTkFont(size=11, weight="bold"), text_color="#F39C12").pack(padx=15, anchor="w")
-        self.profile_var = ctk.StringVar(value=list(self.PROFILE_DISPLAY_MAP.keys())[0])
-        self.cmb_profile = ctk.CTkOptionMenu(
-            sidebar,
-            values=list(self.PROFILE_DISPLAY_MAP.keys()),
-            variable=self.profile_var,
-            command=self._on_profile_changed
-        )
-        self.cmb_profile.pack(fill="x", padx=15, pady=(2, 10))
+        # --- Sticky action bar (always visible) ---
+        actions = ctk.CTkFrame(sidebar, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", padx=16, pady=(8, 16))
+        actions.grid_columnconfigure((0, 1), weight=1)
 
-        # IPD / Disparity separation slider
-        self.lbl_ipd = ctk.CTkLabel(sidebar, text="3D Hatás: Természetes (Ajánlott) [3.5%]", font=ctk.CTkFont(size=11))
-        self.lbl_ipd.pack(padx=15, anchor="w")
-        self.slider_ipd = ctk.CTkSlider(sidebar, from_=0.010, to=0.090, number_of_steps=80, command=self._on_ipd_slide)
-        self.slider_ipd.set(0.035)
-        self.slider_ipd.pack(fill="x", padx=15, pady=(2, 10))
-
-        # Convergence / Zero parallax plane slider
-        self.lbl_conv = ctk.CTkLabel(sidebar, text="Térbeli fókusz (Konvergencia): 50%", font=ctk.CTkFont(size=11))
-        self.lbl_conv.pack(padx=15, anchor="w")
-        self.slider_conv = ctk.CTkSlider(sidebar, from_=0.1, to=0.9, number_of_steps=80, command=self._on_conv_slide)
-        self.slider_conv.set(0.50)
-        self.slider_conv.pack(fill="x", padx=15, pady=(2, 5))
-
-        self.chk_auto_conv = ctk.CTkCheckBox(
-            sidebar, text="✨ Auto Fókusz (Owl3D test-rögzítés)",
-            font=ctk.CTkFont(size=11, weight="bold"), text_color="#3498DB",
-            command=self._on_auto_conv_toggle
-        )
-        self.chk_auto_conv.select()
-        self.chk_auto_conv.pack(padx=15, pady=(0, 10), anchor="w")
-
-        # VR180 FOV slider (only shown in VR180 mode)
-        self.lbl_fov = ctk.CTkLabel(sidebar, text="VR Látószög (FOV): 110°", font=ctk.CTkFont(size=11))
-        self.lbl_fov.pack(padx=15, anchor="w")
-        self.slider_fov = ctk.CTkSlider(sidebar, from_=80.0, to=150.0, number_of_steps=70, command=self._on_fov_slide)
-        self.slider_fov.set(110.0)
-        self.slider_fov.pack(fill="x", padx=15, pady=(2, 10))
-
-        # Options checkboxes
-        self.chk_swap_eyes = ctk.CTkCheckBox(sidebar, text="Szemek felcserélése (Bal / Jobb csere)", font=ctk.CTkFont(size=11), command=self._on_swap_eyes_toggle)
-        self.chk_swap_eyes.pack(padx=15, pady=(5, 5), anchor="w")
-
-        self.chk_temporal = ctk.CTkCheckBox(sidebar, text="Időbeli simítás (Villogásmentes)", font=ctk.CTkFont(size=11))
-        self.chk_temporal.select()
-        self.chk_temporal.pack(padx=15, pady=(5, 5), anchor="w")
-
-        self.chk_nvenc = ctk.CTkCheckBox(sidebar, text="NVIDIA NVENC hardveres kódolás", font=ctk.CTkFont(size=11))
-        self.chk_nvenc.select()
-        self.chk_nvenc.pack(padx=15, pady=(5, 15), anchor="w")
-
-        # --- Actions ---
         self.btn_preview = ctk.CTkButton(
-            sidebar, text="🔄 Előnézet Frissítése", fg_color="#34495E", hover_color="#2C3E50", command=self._update_preview_manual
+            actions, text="Refresh preview", height=32, corner_radius=8,
+            fg_color=SUBTLE, hover_color=SUBTLE_HOVER, text_color=TEXT,
+            command=self._update_preview_manual,
         )
-        self.btn_preview.pack(fill="x", padx=15, pady=(5, 4))
-
+        self.btn_preview.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 8))
         self.btn_quick_test = ctk.CTkButton(
-            sidebar, text="⚡ 5 mp Minta Gyorsteszt", fg_color="#D35400", hover_color="#BA4A00", height=32,
-            font=ctk.CTkFont(size=12, weight="bold"), command=self._start_quick_test
+            actions, text="5 s sample", height=32, corner_radius=8,
+            fg_color=SUBTLE, hover_color=SUBTLE_HOVER, text_color=TEXT,
+            command=self._start_quick_test,
         )
-        self.btn_quick_test.pack(fill="x", padx=15, pady=(2, 8))
+        self.btn_quick_test.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 8))
 
         self.btn_start = ctk.CTkButton(
-            sidebar, text="🚀 Teljes Konvertálás Indítása", fg_color="#27AE60", hover_color="#219955", height=38,
-            font=ctk.CTkFont(size=13, weight="bold"), command=self._start_conversion
+            actions, text="Convert  (Ctrl+Enter)", height=42, corner_radius=10,
+            fg_color=GO, hover_color=GO_HOVER, font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._start_conversion,
         )
-        self.btn_start.pack(fill="x", padx=15, pady=(5, 12))
+        self.btn_start.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         self.btn_cancel = ctk.CTkButton(
-            sidebar, text="⏹ Megszakítás", fg_color="#C0392B", hover_color="#962D22", state="disabled", command=self._cancel_conversion
+            actions, text="Cancel  (Esc)", height=42, corner_radius=10,
+            fg_color=DANGER, hover_color=DANGER_HOVER, font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._cancel_conversion,
         )
-        self.btn_cancel.pack(fill="x", padx=15, pady=(0, 15))
+        # Cancel replaces Convert while busy (same grid cell)
 
-        # --- Revolut Support Box ---
-        donate_frame = ctk.CTkFrame(sidebar, fg_color=("#1A252F", "#141D26"), corner_radius=8, border_width=1, border_color="#2980B9")
-        donate_frame.pack(fill="x", padx=15, pady=(0, 20))
+    def _build_main(self):
+        main = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        main.grid(row=0, column=1, sticky="nsew", padx=16, pady=16)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(1, weight=1)
 
-        lbl_donate = ctk.CTkLabel(
-            donate_frame, text="☕ Támogatás / Support:", font=ctk.CTkFont(size=11, weight="bold"), text_color="#3498DB"
+        # View switcher
+        self.view_seg = ctk.CTkSegmentedButton(
+            main, values=[label for _, label in VIEWS], command=self._on_view_selected,
+            height=32, selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
-        lbl_donate.pack(padx=10, pady=(6, 2))
+        self.view_seg.set(VIEW_LABELS[self.active_view])
+        self.view_seg.grid(row=0, column=0, sticky="w", pady=(0, 10))
 
-        btn_revolut = ctk.CTkButton(
-            donate_frame, text="💙 Revolut: @grezoo", fg_color="#0075EB", hover_color="#005BBB", height=28,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            command=lambda: webbrowser.open("https://revolut.me/grezoo")
-        )
-        btn_revolut.pack(fill="x", padx=10, pady=(2, 8))
-
-        # ==========================================
-        # 2. MAIN AREA: Preview & Progress
-        # ==========================================
-        main_frame = ctk.CTkFrame(self, corner_radius=0)
-        main_frame.grid(row=0, column=1, sticky="nsew", padx=15, pady=15)
-        main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_rowconfigure(1, weight=1)
-
-        # Top Tabs
-        tab_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        tab_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
-
-        self.tab_buttons = {}
-        tabs = [
-            "Wiggle 3D (Szemüveg nélkül)",
-            "3D SBS",
-            "VR180",
-            "Anaglif 3D",
-            "Mélységtérkép",
-            "Bal Szem",
-            "Jobb Szem",
-            "2D Eredeti"
-        ]
-        for tab_name in tabs:
-            btn = ctk.CTkButton(
-                tab_frame,
-                text=tab_name,
-                height=28,
-                fg_color="#1F6AA5" if tab_name == self.active_tab else "#2B2B2B",
-                command=lambda name=tab_name: self._switch_tab(name)
-            )
-            btn.pack(side="left", padx=3)
-            self.tab_buttons[tab_name] = btn
-
-        # Canvas for Image / Preview
-        self.canvas_frame = ctk.CTkFrame(main_frame, fg_color="#121212", corner_radius=8)
-        self.canvas_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        # Preview canvas
+        self.canvas_frame = ctk.CTkFrame(main, fg_color=PREVIEW_BG, corner_radius=12)
+        self.canvas_frame.grid(row=1, column=0, sticky="nsew")
         self.canvas_frame.grid_columnconfigure(0, weight=1)
         self.canvas_frame.grid_rowconfigure(0, weight=1)
 
-        self.lbl_image = tk.Label(self.canvas_frame, bg="#121212", text="Válassz ki egy videót vagy képet a kezdéshez", fg="gray")
-        self.lbl_image.grid(row=0, column=0, sticky="nsew")
-        self.canvas_frame.bind("<Configure>", lambda evt: self._render_current_tab())
+        self.lbl_image = tk.Label(
+            self.canvas_frame, bg=PREVIEW_BG, fg="#8B90A3", font=("Segoe UI", 13),
+            text="Open a video, photo, or photo folder to get started\n\n"
+                 "Ctrl+O  open file     ·     Ctrl+Shift+O  open folder\n"
+                 "1-8  switch view     ·     F5  refresh preview",
+        )
+        self.lbl_image.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.canvas_frame.bind("<Configure>", lambda evt: self._render_current_view())
 
-        # Video Timeline Scrubber (only visible for videos)
-        self.scrub_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
-        self.scrub_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+        # Video timeline scrubber (videos only)
+        self.scrub_frame = ctk.CTkFrame(main, fg_color="transparent")
+        self.scrub_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.scrub_frame.grid_columnconfigure(1, weight=1)
-
-        self.lbl_scrub_time = ctk.CTkLabel(self.scrub_frame, text="00:00 / 00:00", font=ctk.CTkFont(size=11), width=90)
+        self.lbl_scrub_time = ctk.CTkLabel(self.scrub_frame, text="00:00 / 00:00", width=96,
+                                           font=ctk.CTkFont(size=12), text_color=MUTED)
         self.lbl_scrub_time.grid(row=0, column=0, padx=(0, 10))
-
-        self.slider_scrub = ctk.CTkSlider(self.scrub_frame, from_=0, to=100, command=self._on_scrub)
+        self.slider_scrub = ctk.CTkSlider(
+            self.scrub_frame, from_=0, to=100, command=self._on_scrub,
+            button_color=ACCENT, button_hover_color=ACCENT_HOVER, progress_color=ACCENT,
+        )
         self.slider_scrub.set(0)
         self.slider_scrub.grid(row=0, column=1, sticky="ew")
+        self.scrub_frame.grid_remove()
 
-        # Progress and Stats
-        bottom_frame = ctk.CTkFrame(main_frame, corner_radius=6)
-        bottom_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(5, 10))
-        bottom_frame.grid_columnconfigure(0, weight=1)
-
-        self.progress_bar = ctk.CTkProgressBar(bottom_frame)
+        # Status bar
+        bar = ctk.CTkFrame(main, fg_color=CARD, corner_radius=12)
+        bar.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        bar.grid_columnconfigure(0, weight=1)
+        self.status_label = ctk.CTkLabel(bar, text="Starting...", font=ctk.CTkFont(size=12), text_color=TEXT)
+        self.status_label.grid(row=0, column=0, sticky="w", padx=14, pady=(8, 2))
+        self.stats_label = ctk.CTkLabel(bar, text="", font=ctk.CTkFont(size=12, weight="bold"), text_color=ACCENT)
+        self.stats_label.grid(row=0, column=1, sticky="e", padx=14, pady=(8, 2))
+        self.progress_bar = ctk.CTkProgressBar(bar, height=6, progress_color=ACCENT, fg_color=SUBTLE)
         self.progress_bar.set(0.0)
-        self.progress_bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=15, pady=(10, 5))
+        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 10))
 
-        self.status_label = ctk.CTkLabel(
-            bottom_frame, text="Állapot: Inicializálás...", font=ctk.CTkFont(size=11), text_color="#BDC3C7"
-        )
-        self.status_label.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 8))
-
-        self.stats_label = ctk.CTkLabel(
-            bottom_frame, text="", font=ctk.CTkFont(size=11, weight="bold"), text_color="#3498DB"
-        )
-        self.stats_label.grid(row=1, column=1, sticky="e", padx=15, pady=(0, 8))
+    def _bind_shortcuts(self):
+        self.bind("<Control-o>", lambda e: self._browse_input())
+        self.bind("<Control-O>", lambda e: self._browse_folder())  # Ctrl+Shift+O
+        self.bind("<Control-Return>", lambda e: None if self.is_processing else self._start_conversion())
+        self.bind("<Escape>", lambda e: self._cancel_conversion() if self.is_processing else None)
+        self.bind("<F5>", lambda e: self._update_preview_manual())
+        for i, (key, label) in enumerate(VIEWS, start=1):
+            self.bind(str(i), lambda e, k=key: self._select_view(k))
 
     # ==========================================
-    # Event Handlers
+    # Small helpers
+    # ==========================================
+    def _set_status(self, text):
+        self.status_label.configure(text=text)
+
+    def _mode_key(self):
+        return MODES.get(self.mode_var.get(), "vr180")
+
+    def _set_busy(self, busy):
+        self.is_processing = busy
+        state = "disabled" if busy else "normal"
+        self.btn_quick_test.configure(state=state)
+        self.btn_preview.configure(state=state)
+        if busy:
+            self.btn_start.grid_remove()
+            self.btn_cancel.grid(row=1, column=0, columnspan=2, sticky="ew")
+            self.progress_bar.set(0.0)
+        else:
+            self.btn_cancel.grid_remove()
+            self.btn_start.grid()
+
+    def _gather_params(self):
+        return dict(
+            mode=self._mode_key(),
+            ipd_offset=self.slider_ipd.get(),
+            convergence=self.slider_conv.get(),
+            h_fov=self.slider_fov.get(),
+            swap_eyes=self.chk_swap_eyes.get() == 1,
+            auto_convergence=self.chk_auto_conv.get() == 1,
+        )
+
+    def _offer_open_folder(self, title, message, folder):
+        if messagebox.askyesno(title, f"{message}\n\nOpen the output folder?"):
+            try:
+                os.startfile(folder)
+            except Exception:
+                pass
+
+    def _switch_mode_for_photos(self):
+        """VR180 is meant for video; photos look best as Full SBS."""
+        if self._mode_key() == "vr180":
+            sbs_label = label_for(MODES, "sbs_full")
+            self.mode_var.set(sbs_label)
+            self._on_mode_changed(sbs_label)
+
+    # ==========================================
+    # Event handlers
     # ==========================================
     def _browse_input(self):
+        if self.is_processing:
+            return
         file_path = filedialog.askopenfilename(
-            title="Válassz videót vagy képet",
+            title="Choose a video or photo",
             filetypes=[
-                ("Médiafájlok", "*.mp4 *.mkv *.mov *.avi *.jpg *.jpeg *.png *.webp"),
-                ("Videók", "*.mp4 *.mkv *.mov *.avi"),
-                ("Képek", "*.jpg *.jpeg *.png *.webp"),
-                ("Minden fájl", "*.*")
-            ]
+                ("Media files", "*.mp4 *.mkv *.mov *.avi *.jpg *.jpeg *.png *.webp *.bmp"),
+                ("Videos", "*.mp4 *.mkv *.mov *.avi"),
+                ("Images", "*.jpg *.jpeg *.png *.webp *.bmp"),
+                ("All files", "*.*"),
+            ],
         )
         if not file_path:
             return
@@ -364,169 +519,191 @@ class VR3DStudioApp(ctk.CTk):
         self.input_file_path = file_path
         self.is_folder = False
         self.album_files = []
-        self.lbl_input_path.configure(text=os.path.basename(file_path))
-
-        ext = os.path.splitext(file_path)[1].lower()
-        self.is_video = ext in [".mp4", ".mkv", ".mov", ".avi"]
+        self.is_video = os.path.splitext(file_path)[1].lower() in VIDEO_EXTS
 
         if self.is_video:
             cap = cv2.VideoCapture(file_path)
             self.total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            self.slider_scrub.configure(to=max(1, self.total_video_frames - 1))
-            self.slider_scrub.set(0)
+            self.video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             ret, frame = cap.read()
             cap.release()
-            if ret:
-                self.current_frame_bgr = frame
-                self.scrub_frame.grid()
+            if not ret:
+                messagebox.showerror("Can't open video", f"Could not read frames from:\n{file_path}")
+                return
+            self.current_frame_bgr = frame
+            self.slider_scrub.configure(to=max(1, self.total_video_frames - 1))
+            self.slider_scrub.set(0)
+            self._update_scrub_label(0)
+            self.scrub_frame.grid()
+            duration = time.strftime("%M:%S", time.gmtime(int(self.total_video_frames / self.video_fps)))
+            detail = f"Video · {duration} · {self.video_fps:.0f} fps"
         else:
             self.current_frame_bgr = imread_safe(file_path)
+            if self.current_frame_bgr is None:
+                messagebox.showerror("Can't open image", f"Could not read image:\n{file_path}")
+                return
             self.scrub_frame.grid_remove()
-            # If mode is VR180, auto-switch to Full SBS 3D for optimal photo viewing
-            if self.MODE_DISPLAY_MAP.get(self.mode_var.get()) == "vr180":
-                sbs_label = "Full SBS 3D (Normál képernyős 3D - Teljes szélesség)"
-                self.mode_var.set(sbs_label)
-                self._on_mode_changed(sbs_label)
+            self._switch_mode_for_photos()
+            h, w = self.current_frame_bgr.shape[:2]
+            detail = f"Photo · {w}×{h}"
 
+        self.lbl_input_path.configure(text=f"{os.path.basename(file_path)}\n{detail}", text_color=TEXT)
         self._invalidate_cache()
         self._trigger_preview_computation()
 
     def _browse_folder(self):
-        folder_path = filedialog.askdirectory(title="Válassz ki egy fotóalbumot / képeket tartalmazó mappát")
+        if self.is_processing:
+            return
+        folder_path = filedialog.askdirectory(title="Choose a folder of photos")
         if not folder_path:
             return
 
-        valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-        files = [
+        files = sorted(
             os.path.join(folder_path, f)
             for f in os.listdir(folder_path)
-            if os.path.splitext(f)[1].lower() in valid_exts
-        ]
-
+            if os.path.splitext(f)[1].lower() in IMAGE_EXTS
+        )
         if not files:
-            messagebox.showwarning("Üres mappa", "A kiválasztott mappában nem találhatók képek (.jpg, .png, .webp)!")
+            messagebox.showwarning("Empty folder", "No images (.jpg, .png, .webp, .bmp) were found in that folder.")
             return
 
         self.input_file_path = folder_path
         self.is_folder = True
         self.is_video = False
-        self.album_files = sorted(files)
+        self.album_files = files
         self.lbl_input_path.configure(
-            text=f"📁 Album: {os.path.basename(folder_path)} ({len(self.album_files)} db fotó)"
+            text=f"{os.path.basename(folder_path)}\nPhoto album · {len(files)} photos", text_color=TEXT
         )
         self.scrub_frame.grid_remove()
+        self._switch_mode_for_photos()
 
-        # If mode is VR180, auto-switch to Full SBS 3D (_3DH_SBS) for photo albums
-        if self.MODE_DISPLAY_MAP.get(self.mode_var.get()) == "vr180":
-            sbs_label = "Full SBS 3D (Normál képernyős 3D - Teljes szélesség)"
-            self.mode_var.set(sbs_label)
-            self._on_mode_changed(sbs_label)
-
-        # Load first photo as live preview
-        self.current_frame_bgr = imread_safe(self.album_files[0])
+        # First photo is the live preview
+        self.current_frame_bgr = imread_safe(files[0])
         self._invalidate_cache()
         self._trigger_preview_computation()
+
+    def _update_scrub_label(self, frame_idx):
+        cur_str = time.strftime("%M:%S", time.gmtime(int(frame_idx / self.video_fps)))
+        tot_str = time.strftime("%M:%S", time.gmtime(int(self.total_video_frames / self.video_fps)))
+        self.lbl_scrub_time.configure(text=f"{cur_str} / {tot_str}")
 
     def _on_scrub(self, val):
         if not self.is_video or not self.input_file_path:
             return
-        frame_idx = int(val)
+        self._update_scrub_label(int(val))
+        # Debounce: only seek once the user pauses dragging
+        if self.scrub_job is not None:
+            self.after_cancel(self.scrub_job)
+        self.scrub_job = self.after(150, lambda: self._load_frame(int(val)))
+
+    def _load_frame(self, frame_idx):
+        self.scrub_job = None
         cap = cv2.VideoCapture(self.input_file_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         cap.release()
-
         if ret:
             self.current_frame_bgr = frame
-            current_sec = int(frame_idx / fps)
-            total_sec = int(self.total_video_frames / fps)
-            cur_str = time.strftime("%M:%S", time.gmtime(current_sec))
-            tot_str = time.strftime("%M:%S", time.gmtime(total_sec))
-            self.lbl_scrub_time.configure(text=f"{cur_str} / {tot_str}")
             self._invalidate_cache()
             self._trigger_preview_computation()
 
     def _on_model_changed(self, choice):
-        self.status_label.configure(text=f"Állapot: Modell váltása ({choice})...")
+        self._set_status(f"Switching model: {choice}...")
+        self._invalidate_cache()
         threading.Thread(target=self._load_model_worker, daemon=True).start()
 
-    def _on_mode_changed(self, choice):
-        mode_key = self.MODE_DISPLAY_MAP.get(choice, "vr180")
-        if mode_key == "vr180":
-            self.lbl_fov.pack(padx=15, anchor="w")
-            self.slider_fov.pack(fill="x", padx=15, pady=(2, 10))
+    def _update_fov_visibility(self):
+        if self._mode_key() == "vr180":
+            self.fov_row.pack(fill="x", padx=12, pady=(2, 8), after=self._fov_anchor)
         else:
-            self.lbl_fov.pack_forget()
-            self.slider_fov.pack_forget()
-        self._render_current_tab()
+            self.fov_row.pack_forget()
+
+    def _on_mode_changed(self, choice):
+        self._update_fov_visibility()
+        self._render_current_view()
 
     def _on_profile_changed(self, choice):
-        if choice in self.PROFILE_DISPLAY_MAP:
-            ipd, conv = self.PROFILE_DISPLAY_MAP[choice]
+        if choice in PROFILES:
+            ipd, conv = PROFILES[choice]
             self.slider_ipd.set(ipd)
-            self._on_ipd_slide(ipd)
             self.slider_conv.set(conv)
+            self._on_ipd_slide(ipd, refresh=False)
             self._on_conv_slide(conv)
 
-    def _get_ipd_label(self, val):
-        pct = int(val * 1000) / 10.0
+    def _on_ipd_slide(self, val, refresh=True):
         if val < 0.025:
-            desc = "Lágy (Pihentető)"
+            desc = "Soft"
         elif val <= 0.042:
-            desc = "Természetes (Ajánlott)"
+            desc = "Natural"
         elif val <= 0.058:
-            desc = "Erős (Látványos)"
+            desc = "Strong"
         else:
-            desc = "Extrém (Kiemelkedő)"
-        return f"3D Hatás: {desc} [{pct:.1f}%]"
+            desc = "Extreme"
+        self.lbl_ipd.configure(text=f"{desc} · {val * 100:.1f}%")
+        if refresh:
+            self._on_stereo_toggle()
 
-    def _set_preset(self, val):
-        self.slider_ipd.set(val)
-        self._on_ipd_slide(val)
+    def _on_conv_slide(self, val, refresh=True):
+        self.lbl_conv.configure(text=f"{int(val * 100)}%")
+        if refresh:
+            self._on_stereo_toggle()
 
-    def _on_ipd_slide(self, val):
-        self.lbl_ipd.configure(text=self._get_ipd_label(val))
-        if hasattr(self, "btn_preset_soft"):
-            self.btn_preset_soft.configure(fg_color="#1F6AA5" if abs(val - 0.020) < 0.005 else "#34495E")
-            self.btn_preset_norm.configure(fg_color="#1F6AA5" if abs(val - 0.035) < 0.005 else "#34495E")
-            self.btn_preset_strong.configure(fg_color="#1F6AA5" if abs(val - 0.050) < 0.005 else "#34495E")
+    def _on_fov_slide(self, val, refresh=True):
+        self.lbl_fov.configure(text=f"{int(val)}°")
+        if refresh:
+            self._render_current_view()
+
+    def _on_stereo_toggle(self):
         self._invalidate_stereo_cache()
-        self._trigger_preview_computation()
+        self._schedule_preview()
 
-    def _on_conv_slide(self, val):
-        pct = int(val * 100)
-        self.lbl_conv.configure(text=f"Térbeli fókusz (Konvergencia): {pct}%")
-        self._invalidate_stereo_cache()
-        self._trigger_preview_computation()
-
-    def _on_fov_slide(self, val):
-        deg = int(val)
-        self.lbl_fov.configure(text=f"VR Látószög (FOV): {deg}°")
-        self._render_current_tab()
-
-    def _on_auto_conv_toggle(self):
-        self._invalidate_stereo_cache()
-        self._trigger_preview_computation()
-
-    def _on_swap_eyes_toggle(self):
-        self._invalidate_stereo_cache()
-        self._trigger_preview_computation()
+    def _on_appearance_changed(self, choice):
+        ctk.set_appearance_mode(choice)
 
     def _on_settings_change(self):
         if self.current_frame_bgr is not None:
             self._trigger_preview_computation()
 
-    def _switch_tab(self, tab_name):
-        self.active_tab = tab_name
+    def _on_view_selected(self, label):
+        self._select_view(VIEW_KEYS[label])
+
+    def _select_view(self, key):
+        self.active_view = key
+        self.view_seg.set(VIEW_LABELS[key])
         if self.wiggle_job is not None:
             self.after_cancel(self.wiggle_job)
             self.wiggle_job = None
+        self._render_current_view()
 
-        for name, btn in self.tab_buttons.items():
-            btn.configure(fg_color="#1F6AA5" if name == tab_name else "#2B2B2B")
-        self._render_current_tab()
+    def _on_close(self):
+        self._save_settings()
+        if self.video_processor and self.is_processing:
+            self.video_processor.cancel()
+        self.destroy()
 
+    def _save_settings(self):
+        data = {
+            "model": MODELS.get(self.model_var.get(), DEFAULTS["model"]),
+            "mode": self._mode_key(),
+            "profile": self.profile_var.get(),
+            "ipd": round(self.slider_ipd.get(), 4),
+            "conv": round(self.slider_conv.get(), 3),
+            "fov": round(self.slider_fov.get(), 1),
+            "auto_conv": self.chk_auto_conv.get() == 1,
+            "swap": self.chk_swap_eyes.get() == 1,
+            "temporal": self.chk_temporal.get() == 1,
+            "nvenc": self.chk_nvenc.get() == 1,
+            "appearance": self.appearance_seg.get(),
+        }
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except OSError as exc:
+            print(f"[Settings save error] {exc}")
+
+    # ==========================================
+    # Preview pipeline
+    # ==========================================
     def _invalidate_cache(self):
         self.cached_depth = None
         self.cached_left = None
@@ -537,41 +714,59 @@ class VR3DStudioApp(ctk.CTk):
         self.cached_right = None
 
     def _update_preview_manual(self):
+        if self.is_processing:
+            return
         self._invalidate_cache()
         self._trigger_preview_computation()
 
+    def _schedule_preview(self, delay_ms=200):
+        """Debounced preview: slider drags only trigger one render after they settle."""
+        if self.preview_job is not None:
+            self.after_cancel(self.preview_job)
+        self.preview_job = self.after(delay_ms, self._trigger_preview_computation)
+
     def _trigger_preview_computation(self):
+        self.preview_job = None
         if self.current_frame_bgr is None or self.depth_estimator is None:
             return
+        # One preview worker at a time; if busy, re-run once it finishes
+        if self.preview_busy:
+            self.preview_again = True
+            return
+        self.preview_busy = True
         threading.Thread(target=self._compute_preview_worker, daemon=True).start()
 
     def _compute_preview_worker(self):
         try:
-            # Step 1: Depth estimation if not cached
             if self.cached_depth is None:
-                self.after(0, lambda: self.status_label.configure(text="Állapot: Mélységbecslés generálása..."))
+                self.after(0, lambda: self._set_status("Estimating depth..."))
                 self.cached_depth = self.depth_estimator.estimate_depth(self.current_frame_bgr)
 
-            # Step 2: Stereo warping if not cached
             if self.cached_left is None or self.cached_right is None:
-                self.after(0, lambda: self.status_label.configure(text="Állapot: Sztereó képpár renderelése..."))
-                ipd = self.slider_ipd.get()
-                conv = self.slider_conv.get()
-                swap = self.chk_swap_eyes.get() == 1
-                auto_conv = self.chk_auto_conv.get() == 1
+                self.after(0, lambda: self._set_status("Rendering stereo pair..."))
+                p = self._gather_params()
                 self.cached_left, self.cached_right = self.stereo_warper.generate_stereo_pair(
-                    self.current_frame_bgr, self.cached_depth, ipd_offset=ipd, convergence=conv,
-                    swap_eyes=swap, auto_convergence=auto_conv
+                    self.current_frame_bgr, self.cached_depth, ipd_offset=p["ipd_offset"],
+                    convergence=p["convergence"], swap_eyes=p["swap_eyes"],
+                    auto_convergence=p["auto_convergence"],
                 )
 
-            self.after(0, lambda: self.status_label.configure(text="Állapot: Előnézet kész."))
-            self.after(0, self._render_current_tab)
+            self.after(0, lambda: self._set_status("Preview ready."))
+            self.after(0, self._render_current_view)
         except Exception as exc:
             err_msg = str(exc)
             print(f"[Preview error] {err_msg}")
-            self.after(0, lambda msg=err_msg: self.status_label.configure(text=f"Előnézeti hiba: {msg}"))
+            self.after(0, lambda msg=err_msg: self._set_status(f"Preview error: {msg}"))
+        finally:
+            self.after(0, self._preview_done)
 
-    def _render_current_tab(self):
+    def _preview_done(self):
+        self.preview_busy = False
+        if self.preview_again:
+            self.preview_again = False
+            self._trigger_preview_computation()
+
+    def _render_current_view(self):
         if self.current_frame_bgr is None:
             return
 
@@ -579,342 +774,226 @@ class VR3DStudioApp(ctk.CTk):
             self.after_cancel(self.wiggle_job)
             self.wiggle_job = None
 
+        view = self.active_view
+        left, right = self.cached_left, self.cached_right
+        has_pair = left is not None and right is not None
         out_bgr = None
-        tab = self.active_tab
 
-        if tab == "Wiggle 3D (Szemüveg nélkül)":
-            if self.cached_left is not None and self.cached_right is not None:
+        if view == "wiggle":
+            if has_pair:
                 self._step_wiggle()
             return
-        elif tab == "2D Eredeti":
+        elif view == "original":
             out_bgr = self.current_frame_bgr
-        elif tab == "Mélységtérkép":
+        elif view == "depth":
             if self.cached_depth is not None:
                 out_bgr = self.depth_estimator.depth_to_colormap(self.cached_depth)
-        elif tab == "Bal Szem":
-            out_bgr = self.cached_left
-        elif tab == "Jobb Szem":
-            out_bgr = self.cached_right
-        elif tab == "3D SBS":
-            if self.cached_left is not None and self.cached_right is not None:
-                out_bgr = self.stereo_warper.create_sbs(self.cached_left, self.cached_right, half_sbs=False)
-        elif tab == "Anaglif 3D":
-            if self.cached_left is not None and self.cached_right is not None:
-                out_bgr = self.stereo_warper.create_anaglyph(self.cached_left, self.cached_right)
-        elif tab == "VR180":
-            if self.cached_left is not None and self.cached_right is not None:
-                projector = VR180Projector(output_eye_size=(1080, 1080), h_fov_deg=self.slider_fov.get())
-                out_bgr = projector.project_vr180_sbs(self.cached_left, self.cached_right)
+        elif view == "left":
+            out_bgr = left
+        elif view == "right":
+            out_bgr = right
+        elif view == "sbs" and has_pair:
+            out_bgr = self.stereo_warper.create_sbs(left, right, half_sbs=False)
+        elif view == "anaglyph" and has_pair:
+            out_bgr = self.stereo_warper.create_anaglyph(left, right)
+        elif view == "vr180" and has_pair:
+            projector = VR180Projector(output_eye_size=(1080, 1080), h_fov_deg=self.slider_fov.get())
+            out_bgr = projector.project_vr180_sbs(left, right)
 
         if out_bgr is not None:
             self._display_bgr_image(out_bgr)
 
     def _step_wiggle(self):
-        if self.active_tab != "Wiggle 3D (Szemüveg nélkül)":
+        if self.active_view != "wiggle" or self.cached_left is None or self.cached_right is None:
             return
-        if self.cached_left is None or self.cached_right is None:
-            return
-
         self.wiggle_eye = 1 - self.wiggle_eye
-        frame = self.cached_left if self.wiggle_eye == 0 else self.cached_right
-        self._display_bgr_image(frame)
+        self._display_bgr_image(self.cached_left if self.wiggle_eye == 0 else self.cached_right)
         self.wiggle_job = self.after(130, self._step_wiggle)
 
     def _display_bgr_image(self, bgr_img: np.ndarray):
-        # Resize maintaining aspect ratio to fit canvas
-        canvas_w = max(100, self.canvas_frame.winfo_width())
-        canvas_h = max(100, self.canvas_frame.winfo_height())
-
+        canvas_w = max(100, self.canvas_frame.winfo_width() - 12)
+        canvas_h = max(100, self.canvas_frame.winfo_height() - 12)
         img_h, img_w = bgr_img.shape[:2]
         scale = min(canvas_w / img_w, canvas_h / img_h)
-        new_w = max(1, int(img_w * scale))
-        new_h = max(1, int(img_h * scale))
+        new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
 
-        resized = cv2.resize(bgr_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb)
-        photo = ImageTk.PhotoImage(pil_img)
-
+        resized = cv2.resize(bgr_img, new_size, interpolation=cv2.INTER_AREA)
+        photo = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)))
         self.lbl_image.configure(image=photo, text="")
         self.lbl_image.image = photo
 
     # ==========================================
-    # Quick Sample Test (5 seconds)
+    # Quick sample test (5 seconds)
     # ==========================================
     def _start_quick_test(self):
-        if not self.input_file_path or not os.path.exists(self.input_file_path):
-            messagebox.showwarning("Figyelmeztetés", "Kérlek, válassz ki egy videófájlt a gyorsteszthez!")
+        if self.is_processing:
             return
-
+        if not self.input_file_path or not os.path.exists(self.input_file_path):
+            messagebox.showwarning("No video selected", "Open a video file first to render a quick sample.")
+            return
         if not self.is_video:
-            messagebox.showinfo("Információ", "Fotóknál a konvertálás azonnali (1 kép ~0.2 mp), használd közvetlenül a Konvertálás gombot!")
+            messagebox.showinfo("Photos convert instantly",
+                                "Photos take ~0.2 s each, so there's no need for a sample. Just press Convert.")
+            return
+        if self.video_processor is None:
+            messagebox.showinfo("Model loading", "The depth model is still loading. Try again in a moment.")
             return
 
         base_dir, file_name = os.path.split(self.input_file_path)
-        name, ext = os.path.splitext(file_name)
-        mode = self.MODE_DISPLAY_MAP.get(self.mode_var.get(), "vr180")
+        name, _ = os.path.splitext(file_name)
+        mode = self._mode_key()
+        self.output_file_path = os.path.join(base_dir, f"{name}_SAMPLE_5s{SUFFIX_MAP.get(mode, f'_{mode}')}.mp4")
 
-        suffix_map = {
-            "vr180": "_180_SBS",
-            "sbs_full": "_3DH_SBS",
-            "sbs_half": "_3DH_Half_SBS",
-            "anaglyph": "_3D_Anaglyph",
-            "depth_only": "_Depth"
-        }
-        suffix = suffix_map.get(mode, f"_{mode}")
-        self.output_file_path = os.path.join(base_dir, f"{name}_MINTA_5mp{suffix}.mp4")
-
-        self.is_processing = True
-        self.btn_start.configure(state="disabled")
-        if hasattr(self, "btn_quick_test"):
-            self.btn_quick_test.configure(state="disabled")
-        self.btn_cancel.configure(state="normal")
-        self.progress_bar.set(0.0)
-
+        self._set_busy(True)
         threading.Thread(target=self._quick_test_worker, daemon=True).start()
 
+    def _make_progress_cb(self, label):
+        def on_progress(cur, total, fps_val, eta):
+            ratio = cur / max(1, total)
+            self.after(0, lambda r=ratio: self.progress_bar.set(r))
+            self.after(0, lambda c=cur, t=total, p=int(ratio * 100):
+                       self._set_status(f"{label}: frame {c}/{t} ({p}%)"))
+            self.after(0, lambda f=fps_val, rem=eta: self.stats_label.configure(text=f"{f:.1f} FPS · ETA {rem}"))
+        return on_progress
+
     def _quick_test_worker(self):
-        mode = self.MODE_DISPLAY_MAP.get(self.mode_var.get(), "vr180")
-        ipd = self.slider_ipd.get()
-        conv = self.slider_conv.get()
-        fov = self.slider_fov.get()
-        swap = self.chk_swap_eyes.get() == 1
-        auto_conv = self.chk_auto_conv.get() == 1
-        temp_filter = self.chk_temporal.get() == 1
+        p = self._gather_params()
+        temporal = self.chk_temporal.get() == 1
         nvenc = self.chk_nvenc.get() == 1
-
         try:
-            start_frame = int(self.slider_scrub.get()) if hasattr(self, "slider_scrub") else 0
-            cap = cv2.VideoCapture(self.input_file_path)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            cap.release()
-
-            sample_frames = int(fps * 5)
-
-            def on_progress(cur, total, fps_val, eta):
-                ratio = cur / max(1, total)
-                pct = int(ratio * 100)
-                self.after(0, lambda r=ratio: self.progress_bar.set(r))
-                self.after(0, lambda c=cur, t=total, p=pct: self.status_label.configure(text=f"5 mp minta generálása: {c}/{t} képkocka ({p}%)"))
-                self.after(0, lambda f=fps_val, rem=eta: self.stats_label.configure(text=f"⚡ {f:.1f} FPS | ETA: {rem}"))
-
+            start_frame = int(self.slider_scrub.get())
             success = self.video_processor.process_video(
                 self.input_file_path, self.output_file_path,
-                mode=mode, ipd_offset=ipd, convergence=conv,
-                use_temporal_filter=temp_filter, use_nvenc=nvenc,
-                h_fov=fov, swap_eyes=swap, auto_convergence=auto_conv,
-                progress_callback=on_progress,
-                start_frame=start_frame,
-                max_frames=sample_frames
+                use_temporal_filter=temporal, use_nvenc=nvenc,
+                progress_callback=self._make_progress_cb("Rendering 5 s sample"),
+                start_frame=start_frame, max_frames=int(self.video_fps * 5), **p,
             )
-
             if success:
-                self.after(0, lambda: messagebox.showinfo(
-                    "Minta elkészült!",
-                    f"Az 5 másodperces 3D minta videó elkészült:\n{self.output_file_path}\n\nAzonnal megnézheted a headsetben vagy a videólejátszóban a 3D hatást!"
-                ))
+                out = self.output_file_path
+                self.after(0, lambda: self._offer_open_folder(
+                    "Sample ready",
+                    f"Your 5-second 3D sample is ready:\n{out}\n\nCheck it in your headset or player.",
+                    os.path.dirname(out)))
             else:
-                self.after(0, lambda: self.status_label.configure(text="Állapot: Minta generálás megszakítva."))
-
+                self.after(0, lambda: self._set_status("Sample cancelled."))
         except Exception as exc:
             err_msg = str(exc)
             print(f"[Quick test error] {err_msg}")
-            self.after(0, lambda msg=err_msg: messagebox.showerror("Hiba történt", f"Nem sikerült a minta generálása:\n{msg}"))
+            self.after(0, lambda msg=err_msg: messagebox.showerror("Sample failed", f"Could not render the sample:\n{msg}"))
         finally:
-            self.is_processing = False
-            self.after(0, lambda: self.btn_start.configure(state="normal"))
-            if hasattr(self, "btn_quick_test"):
-                self.after(0, lambda: self.btn_quick_test.configure(state="normal"))
-            self.after(0, lambda: self.btn_cancel.configure(state="disabled"))
-            self.after(0, lambda: self.status_label.configure(text="Állapot: Kész."))
+            self.after(0, lambda: self._set_busy(False))
+            self.after(0, lambda: self._set_status("Ready."))
 
     # ==========================================
-    # Conversion Management
+    # Conversion
     # ==========================================
     def _start_conversion(self):
+        if self.is_processing:
+            return
         if not self.input_file_path or not os.path.exists(self.input_file_path):
-            messagebox.showwarning("Figyelmeztetés", "Kérlek, válassz ki egy létező videót, képet vagy fotóalbumot!")
+            messagebox.showwarning("Nothing to convert", "Open a video, photo, or photo folder first.")
+            return
+        if self.video_processor is None:
+            messagebox.showinfo("Model loading", "The depth model is still loading. Try again in a moment.")
             return
 
         if self.is_folder:
-            out_path = filedialog.askdirectory(
-                title="Válassz célmappát a 3D fotók mentéséhez",
-                initialdir=self.input_file_path
+            out_path = filedialog.askdirectory(title="Choose where to save the 3D photos",
+                                               initialdir=self.input_file_path)
+        else:
+            base_dir, file_name = os.path.split(self.input_file_path)
+            name, ext = os.path.splitext(file_name)
+            mode = self._mode_key()
+            out_path = filedialog.asksaveasfilename(
+                title="Save output as",
+                initialdir=base_dir,
+                initialfile=f"{name}{SUFFIX_MAP.get(mode, f'_{mode}')}{ext}",
+                defaultextension=".mp4" if self.is_video else ".jpg",
+                filetypes=[("Video", "*.mp4")] if self.is_video else [("Image", "*.jpg *.png")],
             )
-            if not out_path:
-                return
-
-            self.output_file_path = out_path
-            self.is_processing = True
-            self.btn_start.configure(state="disabled")
-            if hasattr(self, "btn_quick_test"):
-                self.btn_quick_test.configure(state="disabled")
-            self.btn_cancel.configure(state="normal")
-            self.progress_bar.set(0.0)
-
-            threading.Thread(target=self._conversion_worker, daemon=True).start()
-            return
-
-        base_dir, file_name = os.path.split(self.input_file_path)
-        name, ext = os.path.splitext(file_name)
-        mode = self.MODE_DISPLAY_MAP.get(self.mode_var.get(), "vr180")
-
-        # VR Headset standard naming suffixes (Pico, Quest, Skybox VR recognition)
-        suffix_map = {
-            "vr180": "_180_SBS",
-            "sbs_full": "_3DH_SBS",
-            "sbs_half": "_3DH_Half_SBS",
-            "anaglyph": "_3D_Anaglyph",
-            "depth_only": "_Depth"
-        }
-        suffix = suffix_map.get(mode, f"_{mode}")
-        default_out = os.path.join(base_dir, f"{name}{suffix}{ext}")
-
-        out_path = filedialog.asksaveasfilename(
-            title="Kimeneti fájl mentése",
-            initialdir=base_dir,
-            initialfile=os.path.basename(default_out),
-            defaultextension=".mp4" if self.is_video else ".jpg",
-            filetypes=[("Videó fájl", "*.mp4")] if self.is_video else [("Képfájl", "*.jpg *.png")]
-        )
         if not out_path:
             return
 
         self.output_file_path = out_path
-        self.is_processing = True
-        self.btn_start.configure(state="disabled")
-        if hasattr(self, "btn_quick_test"):
-            self.btn_quick_test.configure(state="disabled")
-        self.btn_cancel.configure(state="normal")
-        self.progress_bar.set(0.0)
-
+        self._set_busy(True)
         threading.Thread(target=self._conversion_worker, daemon=True).start()
 
     def _cancel_conversion(self):
         self.is_processing = False
         if self.video_processor:
             self.video_processor.cancel()
-        self.status_label.configure(text="Állapot: Megszakítás folyamatban...")
+        self._set_status("Cancelling...")
 
     def _conversion_worker(self):
-        mode = self.MODE_DISPLAY_MAP.get(self.mode_var.get(), "vr180")
-        ipd = self.slider_ipd.get()
-        conv = self.slider_conv.get()
-        fov = self.slider_fov.get()
-        swap = self.chk_swap_eyes.get() == 1
-        auto_conv = self.chk_auto_conv.get() == 1
-        temp_filter = self.chk_temporal.get() == 1
+        p = self._gather_params()
+        temporal = self.chk_temporal.get() == 1
         nvenc = self.chk_nvenc.get() == 1
+        out = self.output_file_path
 
         try:
             if self.is_folder:
-                # Process photo album folder
-                total = len(self.album_files)
-                os.makedirs(self.output_file_path, exist_ok=True)
-                start_time = time.time()
-
-                suffix_map = {
-                    "vr180": "_180_SBS",
-                    "sbs_full": "_3DH_SBS",
-                    "sbs_half": "_3DH_Half_SBS",
-                    "anaglyph": "_3D_Anaglyph",
-                    "depth_only": "_Depth"
-                }
-                suffix = suffix_map.get(mode, f"_{mode}")
-                success_count = 0
-                error_count = 0
-
-                for idx, in_img_path in enumerate(self.album_files):
-                    if not self.is_processing:
-                        break
-
-                    fname = os.path.basename(in_img_path)
-                    root, ext = os.path.splitext(fname)
-                    clean_root = root if root.endswith(suffix) else f"{root}{suffix}"
-                    out_img_path = os.path.join(self.output_file_path, f"{clean_root}{ext}")
-
-                    ratio = idx / max(1, total)
-                    self.after(0, lambda r=ratio: self.progress_bar.set(r))
-                    pct = int(ratio * 100)
-                    self.after(0, lambda i=idx+1, t=total, p=pct: self.status_label.configure(
-                        text=f"Fotóalbum feldolgozása: {i}/{t} kép ({p}%)"
-                    ))
-
-                    try:
-                        self.video_processor.process_image(
-                            in_img_path, out_img_path,
-                            mode=mode, ipd_offset=ipd, convergence=conv, h_fov=fov,
-                            swap_eyes=swap, auto_convergence=auto_conv
-                        )
-                        success_count += 1
-                    except Exception as img_err:
-                        print(f"[Album Error on {fname}]: {img_err}")
-                        error_count += 1
-
-                    elapsed = time.time() - start_time
-                    fps = (idx + 1) / max(0.001, elapsed)
-                    rem_sec = int((total - (idx + 1)) / max(0.001, fps))
-                    eta = time.strftime("%M:%S", time.gmtime(rem_sec))
-                    self.after(0, lambda f=fps, rem=eta: self.stats_label.configure(
-                        text=f"⚡ {f:.1f} kép/mp | ETA: {rem}"
-                    ))
-
-                if self.is_processing:
-                    self.after(0, lambda: self.progress_bar.set(1.0))
-                    self.after(0, lambda: self.status_label.configure(text=f"Állapot: Kész ({success_count} fotó elkészült)."))
-                    self.after(0, lambda: messagebox.showinfo(
-                        "Siker", f"A fotóalbum ({success_count}/{total} kép) sikeresen elkészült a célmappában:\n{self.output_file_path}"
-                    ))
-                    try:
-                        os.startfile(self.output_file_path)
-                    except Exception:
-                        pass
-                else:
-                    self.after(0, lambda: self.status_label.configure(text="Állapot: Mappa konvertálás megszakítva."))
-
+                self._convert_album(p, out)
             elif not self.is_video:
-                # Process single image
-                self.after(0, lambda: self.status_label.configure(text="Kép konvertálása..."))
-                self.video_processor.process_image(
-                    self.input_file_path, self.output_file_path,
-                    mode=mode, ipd_offset=ipd, convergence=conv, h_fov=fov,
-                    swap_eyes=swap, auto_convergence=auto_conv
-                )
+                self.after(0, lambda: self._set_status("Converting image..."))
+                self.video_processor.process_image(self.input_file_path, out, **p)
                 self.after(0, lambda: self.progress_bar.set(1.0))
-                self.after(0, lambda: messagebox.showinfo("Siker", f"A 3D kép elkészült:\n{self.output_file_path}"))
+                self.after(0, lambda: self._offer_open_folder(
+                    "Done", f"Your 3D image is ready:\n{out}", os.path.dirname(out)))
             else:
-                # Process video
-                def on_progress(cur, total, fps_val, eta):
-                    ratio = cur / max(1, total)
-                    pct = int(ratio * 100)
-                    self.after(0, lambda r=ratio: self.progress_bar.set(r))
-                    self.after(0, lambda c=cur, t=total, p=pct: self.status_label.configure(text=f"Feldolgozás: {c}/{t} képkocka ({p}%)"))
-                    self.after(0, lambda f=fps_val, rem=eta: self.stats_label.configure(text=f"⚡ {f:.1f} FPS | ETA: {rem}"))
-
                 success = self.video_processor.process_video(
-                    self.input_file_path, self.output_file_path,
-                    mode=mode, ipd_offset=ipd, convergence=conv,
-                    use_temporal_filter=temp_filter, use_nvenc=nvenc,
-                    h_fov=fov, swap_eyes=swap, auto_convergence=auto_conv,
-                    progress_callback=on_progress
+                    self.input_file_path, out,
+                    use_temporal_filter=temporal, use_nvenc=nvenc,
+                    progress_callback=self._make_progress_cb("Converting"), **p,
                 )
-
                 if success:
-                    self.after(0, lambda: messagebox.showinfo("Siker", f"A 3D videó sikeresen elkészült:\n{self.output_file_path}"))
+                    self.after(0, lambda: self._offer_open_folder(
+                        "Done", f"Your 3D video is ready:\n{out}", os.path.dirname(out)))
                 else:
-                    self.after(0, lambda: self.status_label.configure(text="Állapot: Konvertálás megszakítva."))
-
+                    self.after(0, lambda: self._set_status("Conversion cancelled."))
         except Exception as exc:
             err_msg = str(exc)
             print(f"[Conversion error] {err_msg}")
-            self.after(0, lambda msg=err_msg: messagebox.showerror("Hiba történt", f"Nem sikerült a konvertálás:\n{msg}"))
+            self.after(0, lambda msg=err_msg: messagebox.showerror("Conversion failed", f"Could not convert:\n{msg}"))
         finally:
-            self.is_processing = False
-            self.after(0, lambda: self.btn_start.configure(state="normal"))
-            if hasattr(self, "btn_quick_test"):
-                self.after(0, lambda: self.btn_quick_test.configure(state="normal"))
-            self.after(0, lambda: self.btn_cancel.configure(state="disabled"))
-            self.after(0, lambda: self.status_label.configure(text="Állapot: Kész."))
+            self.after(0, lambda: self._set_busy(False))
+            self.after(0, lambda: self._set_status("Ready."))
+
+    def _convert_album(self, p, out_dir):
+        total = len(self.album_files)
+        os.makedirs(out_dir, exist_ok=True)
+        suffix = SUFFIX_MAP.get(p["mode"], f"_{p['mode']}")
+        start_time = time.time()
+        success_count = 0
+
+        for idx, in_img_path in enumerate(self.album_files):
+            if not self.is_processing:
+                break
+
+            root, ext = os.path.splitext(os.path.basename(in_img_path))
+            clean_root = root if root.endswith(suffix) else f"{root}{suffix}"
+            out_img_path = os.path.join(out_dir, f"{clean_root}{ext}")
+
+            ratio = idx / max(1, total)
+            self.after(0, lambda r=ratio: self.progress_bar.set(r))
+            self.after(0, lambda i=idx + 1, pct=int(ratio * 100):
+                       self._set_status(f"Converting album: photo {i}/{total} ({pct}%)"))
+
+            try:
+                self.video_processor.process_image(in_img_path, out_img_path, **p)
+                success_count += 1
+            except Exception as img_err:
+                print(f"[Album error on {os.path.basename(in_img_path)}]: {img_err}")
+
+            rate = (idx + 1) / max(0.001, time.time() - start_time)
+            eta = time.strftime("%M:%S", time.gmtime(int((total - idx - 1) / max(0.001, rate))))
+            self.after(0, lambda f=rate, rem=eta: self.stats_label.configure(text=f"{f:.1f} photos/s · ETA {rem}"))
+
+        if self.is_processing:
+            self.after(0, lambda: self.progress_bar.set(1.0))
+            self.after(0, lambda: self._offer_open_folder(
+                "Done", f"Converted {success_count} of {total} photos into:\n{out_dir}", out_dir))
+        else:
+            self.after(0, lambda: self._set_status("Album conversion cancelled."))
 
 
 def main():

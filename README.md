@@ -25,7 +25,7 @@ Built as a high-performance, free alternative to proprietary subscription tools 
 - 🌐 **Full Headset Compatibility:**
   - Auto-injects Google Spatial Media VR180 equirectangular spherical metadata tags.
   - Automatically appends standard naming tags (`_180_sbs`, `_3D_full_sbs`) so players like **Pico Video / Gallery**, **Meta Quest TV**, **Skybox VR**, **4X-VR**, and **DeoVR** detect and play them in 3D without manual menu adjustments.
-- 🛡️ **Unicode / International Path Safe:** Robust Windows file handling supporting Hungarian and international accents.
+- 🛡️ **Unicode / International Path Safe:** Robust Windows file handling supporting accented and international file names.
 
 ---
 
@@ -42,7 +42,7 @@ Built as a high-performance, free alternative to proprietary subscription tools 
 
 ### 1. Clone repository
 ```bash
-git clone https://github.com/your-username/vr3d-studio.git
+git clone https://github.com/mdelaguera/vr3d-studio.git
 cd vr3d-studio
 ```
 
@@ -79,17 +79,16 @@ When you launch the app or select a model in the dropdown, the software **automa
 
 ## 🕹️ GUI Usage
 
-1. **Select Input:** Click **📄 Egyedi fájl tallózása** for single video/photo, or **📁 Teljes Fotóalbum** for entire photo folders.
-2. **Choose Mode:** Select **VR180 3D** (for VR headsets) or **Full SBS 3D** (for 3D monitors/TVs).
-3. **Check Depth on Monitor:**
-   - Click the **Wiggle 3D** tab to see depth layers moving without any 3D glasses!
-   - Select a preset: **Lágy 3D** (Soft/Relaxed), **Természetes ✨** (Natural/Recommended 1.8%), or **Erős 3D** (Strong).
-4. **Test Before Full Render (Videos):**
-   - Click **⚡ 5 mp Minta Gyorsteszt** to render a 5-second sample from your current timeline position.
-5. **Start:** Click **🚀 Teljes Konvertálás Indítása**.
+1. **Open a source:** Click **Open file** (video or photo, `Ctrl+O`) or **Open folder** (a whole photo album, `Ctrl+Shift+O`).
+2. **Pick model & format:** Choose **VR180 3D** for headsets or **Full SBS 3D** for 3D TVs/monitors. Photos automatically switch to Full SBS.
+3. **Tune the 3D effect:** Pick a preset (**Soft**, **Natural**, **Deep**, **Pop-out**, **Extreme**) or fine-tune *Depth strength* and *Focus plane*.
+4. **Check depth on a normal monitor:** The **Wiggle 3D** view flips between the two eyes so you can see depth without glasses. Keys `1`–`8` switch preview views, `F5` refreshes.
+5. **Test before a full render (videos):** Scrub to a spot and click **5 s sample**.
+6. **Convert:** Click **Convert** (`Ctrl+Enter`). `Esc` cancels. When it finishes, you can open the output folder straight from the dialog.
+
+Your settings (model, format, sliders, toggles, light/dark theme) are remembered between sessions in `~/.vr3d_studio.json`.
 
 ---
-
 ## ⌨️ Command Line (CLI) Usage
 
 For automated or headless processing:
@@ -132,15 +131,15 @@ vr3d-studio/
 │   ├── io_utils.py             # Unicode-safe image/video I/O
 │   └── depth_anything_v2/      # Model architecture
 ├── gui/
-│   └── app.py                  # CustomTkinter Dark UI (Wiggle 3D, Presets)
+│   └── app.py                  # CustomTkinter UI (light/dark, Wiggle 3D, presets)
 └── weights/                    # Cached AI weights (auto-downloaded)
 ```
 
 ---
 
-## ☕ Support & Donations / Támogatás
+## 🙏 Credits
 
-If you find **VR3D Studio** helpful and it saved you from expensive commercial subscriptions (like Owl3D), feel free to support the developer and buy me a coffee via Revolut!
+This project is a fork of [grezoo/vr3d-studio](https://github.com/grezoo/vr3d-studio). If the original saved you from an expensive subscription, consider supporting its author via Revolut:
 
 [![Donate with Revolut](https://img.shields.io/badge/Donate%20via%20Revolut-%40grezoo-0075eb.svg?style=for-the-badge&logo=revolut&logoColor=white)](https://revolut.me/grezoo)
 

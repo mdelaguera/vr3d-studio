@@ -3,13 +3,13 @@ title VR3D Studio - 2D to 3D SBS & VR180 Converter
 cd /d "%~dp0"
 echo ========================================================
 echo   VR3D Studio - AI 2D to 3D SBS and VR180 Converter
-echo   NVIDIA RTX 5070 CUDA Gyorsitassal
+echo   NVIDIA CUDA accelerated
 echo ========================================================
 echo.
-echo Inditas...
+echo Starting...
 python main.py
 if errorlevel 1 (
     echo.
-    echo Hiba tortent az alkalmazas futasa kozben.
+    echo An error occurred while running the application.
     pause
 )
