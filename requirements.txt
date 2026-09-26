@@ -8,3 +8,7 @@ customtkinter>=5.2.0
 requests>=2.31.0
 tqdm>=4.66.0
 tkinterdnd2>=0.4.2
+# Hybrid / Marigold depth models
+diffusers>=0.30.0
+transformers>=4.40.0
+accelerate>=0.30.0

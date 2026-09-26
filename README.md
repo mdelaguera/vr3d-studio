@@ -101,12 +101,12 @@ python main.py -i "input_video.mp4" -m vr180 --fov 110
 python main.py -i "C:/Photos/Vacation" -o "C:/Photos/Vacation_3D" -m vr180
 
 # Convert image to Full Side-by-Side 3D:
-python main.py -i "photo.jpg" -m sbs_full --ipd 0.018
+python main.py -i "photo.jpg" -m sbs_full --ipd 0.035
 
 # Options:
 #   --mode, -m        vr180 | sbs_full | sbs_half | anaglyph | depth_only
 #   --model           vits (fast) | vitb (balanced) | vitl (quality)
-#   --ipd             Disparity strength (default: 0.018)
+#   --ipd             3D strength (default: 0.035, same as GUI "Natural")
 #   --fov             VR180 horizontal FOV (default: 110.0)
 #   --swap-eyes       Swap Left and Right eye channels
 #   --no-nvenc        Use CPU x264 instead of NVIDIA NVENC

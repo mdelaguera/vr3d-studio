@@ -23,7 +23,7 @@ def main():
         help="Stereo conversion mode"
     )
     parser.add_argument("--model", type=str, default="vits", choices=["vits", "vitb", "vitl"], help="AI model size")
-    parser.add_argument("--ipd", type=float, default=0.018, help="Interpupillary disparity scale (default: 0.018)")
+    parser.add_argument("--ipd", type=float, default=0.035, help="3D strength / disparity scale (default: 0.035, matches the GUI 'Natural' preset)")
     parser.add_argument("--conv", type=float, default=0.5, help="Zero parallax convergence depth (default: 0.5)")
     parser.add_argument("--fov", type=float, default=110.0, help="VR180 horizontal FOV in degrees (default: 110)")
     parser.add_argument("--swap-eyes", action="store_true", help="Swap Left and Right eye views")
