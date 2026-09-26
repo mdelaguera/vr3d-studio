@@ -62,3 +62,4 @@ $RECYCLE.BIN/
 .idea/
 *.swp
 *.swo
+weights/*.part

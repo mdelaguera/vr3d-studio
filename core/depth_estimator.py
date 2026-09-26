@@ -28,7 +28,7 @@ MODEL_CONFIGS = {
         "out_channels": [48, 96, 192, 384],
         "filename": "depth_anything_v2_vits.pth",
         "url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth",
-        "desc": "Small (Ultra-gyors, ~100+ FPS, élő előnézethez)",
+        "desc": "Small (Ultra-fast, ~100+ FPS, for live preview)",
     },
     "vitb": {
         "encoder": "vitb",
@@ -36,7 +36,7 @@ MODEL_CONFIGS = {
         "out_channels": [96, 192, 384, 768],
         "filename": "depth_anything_v2_vitb.pth",
         "url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Base/resolve/main/depth_anything_v2_vitb.pth",
-        "desc": "Base (Kiegyensúlyozott, nagy pontosság, ~50 FPS)",
+        "desc": "Base (Balanced, high accuracy, ~50 FPS)",
     },
     "vitl": {
         "encoder": "vitl",
@@ -44,7 +44,7 @@ MODEL_CONFIGS = {
         "out_channels": [256, 512, 1024, 1024],
         "filename": "depth_anything_v2_vitl.pth",
         "url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Large/resolve/main/depth_anything_v2_vitl.pth",
-        "desc": "Large (Csúcsminőség, legélesebb mélységél, ~25-35 FPS)",
+        "desc": "Large (Top quality, sharpest depth edges, ~25-35 FPS)",
     },
 }
 
@@ -102,7 +102,10 @@ class DepthEstimator:
         """Downloads model weights if not already present."""
         if not os.path.exists(self.weights_path) or os.path.getsize(self.weights_path) < 1000:
             print(f"Downloading {self.model_size} weights from {self.config['url']}...")
-            urllib.request.urlretrieve(self.config["url"], self.weights_path)
+            # Download to a temp file so an interrupted download never leaves a corrupt .pth behind
+            tmp_path = self.weights_path + ".part"
+            urllib.request.urlretrieve(self.config["url"], tmp_path)
+            os.replace(tmp_path, self.weights_path)
             print(f"Weights downloaded to {self.weights_path}")
 
     def _load_model(self):
