@@ -27,6 +27,14 @@ from core.stereo_warper import StereoWarper
 from core.vr180_projector import VR180Projector
 from core.video_processor import VideoProcessor
 
+# Drag & drop is optional: the app still works (browse buttons only) without tkinterdnd2
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    DND_BASES = (TkinterDnD.DnDWrapper,)
+except ImportError:
+    TkinterDnD = None
+    DND_BASES = ()
+
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".vr3d_studio.json")
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi"}
@@ -135,12 +143,19 @@ def label_for(mapping: dict, value) -> str:
     return next(k for k, v in mapping.items() if v == value)
 
 
-class VR3DStudioApp(ctk.CTk):
+class VR3DStudioApp(ctk.CTk, *DND_BASES):
     def __init__(self):
         self.settings = load_settings()
         ctk.set_appearance_mode(self.settings["appearance"])
         ctk.set_default_color_theme("blue")
         super().__init__()
+        self.dnd_enabled = False
+        if TkinterDnD is not None:
+            try:
+                self.TkdndVersion = TkinterDnD._require(self)
+                self.dnd_enabled = True
+            except Exception as exc:
+                print(f"[Drag & drop unavailable] {exc}")
 
         self.title("VR3D Studio - 2D to 3D SBS & VR180 Converter")
         self.geometry("1280x800")
@@ -175,6 +190,9 @@ class VR3DStudioApp(ctk.CTk):
 
         self._build_ui()
         self._bind_shortcuts()
+        if self.dnd_enabled:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>", self._on_drop)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._init_backend_async()
 
@@ -409,7 +427,7 @@ class VR3DStudioApp(ctk.CTk):
 
         self.lbl_image = tk.Label(
             self.canvas_frame, bg=PREVIEW_BG, fg="#8B90A3", font=("Segoe UI", 13),
-            text="Open a video, photo, or photo folder to get started\n\n"
+            text="Drop a video, photo, or photo folder here to get started\n\n"
                  "Ctrl+O  open file     ·     Ctrl+Shift+O  open folder\n"
                  "1-8  switch view     ·     F5  refresh preview",
         )
@@ -513,9 +531,24 @@ class VR3DStudioApp(ctk.CTk):
                 ("All files", "*.*"),
             ],
         )
-        if not file_path:
-            return
+        if file_path:
+            self._open_file(file_path)
 
+    def _on_drop(self, event):
+        if self.is_processing:
+            return
+        paths = self.tk.splitlist(event.data)  # handles {paths with spaces}
+        if not paths:
+            return
+        path = paths[0]
+        if os.path.isdir(path):
+            self._open_folder(path)
+        elif os.path.splitext(path)[1].lower() in VIDEO_EXTS | IMAGE_EXTS:
+            self._open_file(path)
+        else:
+            messagebox.showwarning("Unsupported file", f"Drop a video, image, or folder of images.\n\n{path}")
+
+    def _open_file(self, file_path):
         self.input_file_path = file_path
         self.is_folder = False
         self.album_files = []
@@ -555,9 +588,10 @@ class VR3DStudioApp(ctk.CTk):
         if self.is_processing:
             return
         folder_path = filedialog.askdirectory(title="Choose a folder of photos")
-        if not folder_path:
-            return
+        if folder_path:
+            self._open_folder(folder_path)
 
+    def _open_folder(self, folder_path):
         files = sorted(
             os.path.join(folder_path, f)
             for f in os.listdir(folder_path)
@@ -572,7 +606,7 @@ class VR3DStudioApp(ctk.CTk):
         self.is_video = False
         self.album_files = files
         self.lbl_input_path.configure(
-            text=f"{os.path.basename(folder_path)}\nPhoto album · {len(files)} photos", text_color=TEXT
+            text=f"{os.path.basename(folder_path)}\nPhoto album · {len(files)} photo{'' if len(files) == 1 else 's'}", text_color=TEXT
         )
         self.scrub_frame.grid_remove()
         self._switch_mode_for_photos()

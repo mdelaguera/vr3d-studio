@@ -79,7 +79,7 @@ When you launch the app or select a model in the dropdown, the software **automa
 
 ## 🕹️ GUI Usage
 
-1. **Open a source:** Click **Open file** (video or photo, `Ctrl+O`) or **Open folder** (a whole photo album, `Ctrl+Shift+O`).
+1. **Open a source:** Drag a video, photo, or folder onto the window, or click **Open file** (video or photo, `Ctrl+O`) or **Open folder** (a whole photo album, `Ctrl+Shift+O`).
 2. **Pick model & format:** Choose **VR180 3D** for headsets or **Full SBS 3D** for 3D TVs/monitors. Photos automatically switch to Full SBS.
 3. **Tune the 3D effect:** Pick a preset (**Soft**, **Natural**, **Deep**, **Pop-out**, **Extreme**) or fine-tune *Depth strength* and *Focus plane*.
 4. **Check depth on a normal monitor:** The **Wiggle 3D** view flips between the two eyes so you can see depth without glasses. Keys `1`–`8` switch preview views, `F5` refreshes.
