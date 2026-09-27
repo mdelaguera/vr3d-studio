@@ -37,6 +37,10 @@ except ImportError:
 
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".vr3d_studio.json")
 
+# Preview runs on a downscaled copy (the canvas is smaller anyway); exports use full resolution.
+# ponytail: fixed cap, make it follow canvas size if 4K monitors look soft
+PREVIEW_MAX_SIDE = 960
+
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
@@ -185,8 +189,12 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         self.wiggle_job = None
         self.preview_job = None
         self.scrub_job = None
+        self.resize_job = None
         self.preview_busy = False
-        self.preview_again = False
+        self.video_cap = None
+        # Bumped whenever inputs change; stale preview results are discarded on commit
+        self.depth_gen = 0
+        self.stereo_gen = 0
 
         self._build_ui()
         self._bind_shortcuts()
@@ -201,12 +209,12 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
     # ==========================================
     def _init_backend_async(self):
         """Loads the AI model in a background thread so the UI starts immediately."""
-        self._set_status("Loading depth model onto GPU...")
-        threading.Thread(target=self._load_model_worker, daemon=True).start()
+        self._set_status("Loading depth model...")
+        model_key = MODELS.get(self.model_var.get(), "vits")
+        threading.Thread(target=self._load_model_worker, args=(model_key,), daemon=True).start()
 
-    def _load_model_worker(self):
+    def _load_model_worker(self, model_key):
         try:
-            model_key = MODELS.get(self.model_var.get(), "vits")
             self.depth_estimator = DepthEstimator(model_size=model_key)
             self.video_processor = VideoProcessor(self.depth_estimator, self.stereo_warper)
             gpu = self._detect_gpu()
@@ -432,7 +440,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
                  "1-8  switch view     ·     F5  refresh preview",
         )
         self.lbl_image.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-        self.canvas_frame.bind("<Configure>", lambda evt: self._render_current_view())
+        self.canvas_frame.bind("<Configure>", self._on_canvas_resize)
 
         # Video timeline scrubber (videos only)
         self.scrub_frame = ctk.CTkFrame(main, fg_color="transparent")
@@ -548,22 +556,38 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         else:
             messagebox.showwarning("Unsupported file", f"Drop a video, image, or folder of images.\n\n{path}")
 
+    def _close_video(self):
+        if self.video_cap is not None:
+            self.video_cap.release()
+            self.video_cap = None
+
     def _open_file(self, file_path):
+        is_video = os.path.splitext(file_path)[1].lower() in VIDEO_EXTS
+
+        # Read first; only switch the app to this file if it actually opens
+        if is_video:
+            cap = cv2.VideoCapture(file_path)
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                messagebox.showerror("Can't open video", f"Could not read frames from:\n{file_path}")
+                return
+        else:
+            frame = imread_safe(file_path)
+            if frame is None:
+                messagebox.showerror("Can't open image", f"Could not read image:\n{file_path}")
+                return
+
+        self._close_video()
         self.input_file_path = file_path
         self.is_folder = False
         self.album_files = []
-        self.is_video = os.path.splitext(file_path)[1].lower() in VIDEO_EXTS
+        self.is_video = is_video
 
-        if self.is_video:
-            cap = cv2.VideoCapture(file_path)
+        if is_video:
+            self.video_cap = cap  # kept open so scrubbing doesn't reopen the file each time
             self.total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
-                messagebox.showerror("Can't open video", f"Could not read frames from:\n{file_path}")
-                return
-            self.current_frame_bgr = frame
             self.slider_scrub.configure(to=max(1, self.total_video_frames - 1))
             self.slider_scrub.set(0)
             self._update_scrub_label(0)
@@ -571,17 +595,24 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             duration = time.strftime("%M:%S", time.gmtime(int(self.total_video_frames / self.video_fps)))
             detail = f"Video · {duration} · {self.video_fps:.0f} fps"
         else:
-            self.current_frame_bgr = imread_safe(file_path)
-            if self.current_frame_bgr is None:
-                messagebox.showerror("Can't open image", f"Could not read image:\n{file_path}")
-                return
             self.scrub_frame.grid_remove()
             self._switch_mode_for_photos()
-            h, w = self.current_frame_bgr.shape[:2]
-            detail = f"Photo · {w}×{h}"
+            detail = f"Photo · {frame.shape[1]}×{frame.shape[0]}"
 
         self.lbl_input_path.configure(text=f"{os.path.basename(file_path)}\n{detail}", text_color=TEXT)
+        self._set_source_frame(frame)
+
+    def _set_source_frame(self, frame):
+        """New input frame: downscale for preview, show it immediately, then recompute 3D."""
+        h, w = frame.shape[:2]
+        scale = PREVIEW_MAX_SIDE / max(h, w)
+        if scale < 1:
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        self.current_frame_bgr = frame
         self._invalidate_cache()
+        # Show the raw frame right away so the picture always matches the time bar
+        self._stop_wiggle()
+        self._display_bgr_image(frame)
         self._trigger_preview_computation()
 
     def _browse_folder(self):
@@ -601,6 +632,13 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             messagebox.showwarning("Empty folder", "No images (.jpg, .png, .webp, .bmp) were found in that folder.")
             return
 
+        # First readable photo is the live preview
+        first = next((img for img in map(imread_safe, files[:10]) if img is not None), None)
+        if first is None:
+            messagebox.showwarning("Unreadable images", "Couldn't read the first images in that folder.")
+            return
+
+        self._close_video()
         self.input_file_path = folder_path
         self.is_folder = True
         self.is_video = False
@@ -610,11 +648,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         )
         self.scrub_frame.grid_remove()
         self._switch_mode_for_photos()
-
-        # First photo is the live preview
-        self.current_frame_bgr = imread_safe(files[0])
-        self._invalidate_cache()
-        self._trigger_preview_computation()
+        self._set_source_frame(first)
 
     def _update_scrub_label(self, frame_idx):
         cur_str = time.strftime("%M:%S", time.gmtime(int(frame_idx / self.video_fps)))
@@ -632,19 +666,17 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
 
     def _load_frame(self, frame_idx):
         self.scrub_job = None
-        cap = cv2.VideoCapture(self.input_file_path)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        cap.release()
+        if self.video_cap is None:
+            return
+        self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = self.video_cap.read()
         if ret:
-            self.current_frame_bgr = frame
-            self._invalidate_cache()
-            self._trigger_preview_computation()
+            self._set_source_frame(frame)
 
     def _on_model_changed(self, choice):
         self._set_status(f"Switching model: {choice}...")
         self._invalidate_cache()
-        threading.Thread(target=self._load_model_worker, daemon=True).start()
+        threading.Thread(target=self._load_model_worker, args=(MODELS.get(choice, "vits"),), daemon=True).start()
 
     def _update_fov_visibility(self):
         if self._mode_key() == "vr180":
@@ -704,13 +736,11 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
     def _select_view(self, key):
         self.active_view = key
         self.view_seg.set(VIEW_LABELS[key])
-        if self.wiggle_job is not None:
-            self.after_cancel(self.wiggle_job)
-            self.wiggle_job = None
         self._render_current_view()
 
     def _on_close(self):
         self._save_settings()
+        self._close_video()
         if self.video_processor and self.is_processing:
             self.video_processor.cancel()
         self.destroy()
@@ -739,11 +769,12 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
     # Preview pipeline
     # ==========================================
     def _invalidate_cache(self):
+        self.depth_gen += 1
         self.cached_depth = None
-        self.cached_left = None
-        self.cached_right = None
+        self._invalidate_stereo_cache()
 
     def _invalidate_stereo_cache(self):
+        self.stereo_gen += 1
         self.cached_left = None
         self.cached_right = None
 
@@ -763,50 +794,63 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         self.preview_job = None
         if self.current_frame_bgr is None or self.depth_estimator is None:
             return
-        # One preview worker at a time; if busy, re-run once it finishes
-        if self.preview_busy:
-            self.preview_again = True
+        # One worker at a time; _preview_done re-triggers if inputs changed meanwhile
+        if self.preview_busy or (self.cached_depth is not None and self.cached_left is not None):
             return
         self.preview_busy = True
-        threading.Thread(target=self._compute_preview_worker, daemon=True).start()
+        # Snapshot every input on the UI thread; the worker never touches Tk widgets or caches
+        job = dict(
+            frame=self.current_frame_bgr,
+            depth=self.cached_depth,
+            depth_gen=self.depth_gen,
+            stereo_gen=self.stereo_gen,
+            params=self._gather_params(),
+        )
+        threading.Thread(target=self._compute_preview_worker, args=(job,), daemon=True).start()
 
-    def _compute_preview_worker(self):
+    def _compute_preview_worker(self, job):
+        result = None
         try:
-            if self.cached_depth is None:
+            t0 = time.time()
+            depth = job["depth"]
+            if depth is None:
                 self.after(0, lambda: self._set_status("Estimating depth..."))
-                self.cached_depth = self.depth_estimator.estimate_depth(self.current_frame_bgr)
+                depth = self.depth_estimator.estimate_depth(job["frame"])
 
-            if self.cached_left is None or self.cached_right is None:
-                self.after(0, lambda: self._set_status("Rendering stereo pair..."))
-                p = self._gather_params()
-                self.cached_left, self.cached_right = self.stereo_warper.generate_stereo_pair(
-                    self.current_frame_bgr, self.cached_depth, ipd_offset=p["ipd_offset"],
-                    convergence=p["convergence"], swap_eyes=p["swap_eyes"],
-                    auto_convergence=p["auto_convergence"],
-                )
-
-            self.after(0, lambda: self._set_status("Preview ready."))
-            self.after(0, self._render_current_view)
+            self.after(0, lambda: self._set_status("Rendering stereo pair..."))
+            p = job["params"]
+            left, right = self.stereo_warper.generate_stereo_pair(
+                job["frame"], depth, ipd_offset=p["ipd_offset"], convergence=p["convergence"],
+                swap_eyes=p["swap_eyes"], auto_convergence=p["auto_convergence"],
+            )
+            result = (depth, left, right, time.time() - t0)
         except Exception as exc:
             err_msg = str(exc)
             print(f"[Preview error] {err_msg}")
             self.after(0, lambda msg=err_msg: self._set_status(f"Preview error: {msg}"))
         finally:
-            self.after(0, self._preview_done)
+            self.after(0, lambda: self._preview_done(job, result))
 
-    def _preview_done(self):
+    def _preview_done(self, job, result):
+        """Runs on the UI thread. Commits only results whose inputs are still current."""
         self.preview_busy = False
-        if self.preview_again:
-            self.preview_again = False
+        if result is not None:
+            depth, left, right, secs = result
+            if job["depth_gen"] == self.depth_gen:
+                self.cached_depth = depth
+                if job["stereo_gen"] == self.stereo_gen:
+                    self.cached_left, self.cached_right = left, right
+                    self._set_status(f"Preview ready ({secs:.1f} s).")
+                    self._render_current_view()
+        # Frame or settings changed while we worked: go again with the fresh inputs
+        if (job["depth_gen"], job["stereo_gen"]) != (self.depth_gen, self.stereo_gen):
             self._trigger_preview_computation()
 
     def _render_current_view(self):
+        self.resize_job = None
         if self.current_frame_bgr is None:
             return
-
-        if self.wiggle_job is not None:
-            self.after_cancel(self.wiggle_job)
-            self.wiggle_job = None
+        self._stop_wiggle()
 
         view = self.active_view
         left, right = self.cached_left, self.cached_right
@@ -836,6 +880,17 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
 
         if out_bgr is not None:
             self._display_bgr_image(out_bgr)
+
+    def _stop_wiggle(self):
+        if self.wiggle_job is not None:
+            self.after_cancel(self.wiggle_job)
+            self.wiggle_job = None
+
+    def _on_canvas_resize(self, _evt=None):
+        # Window drags fire dozens of events; redraw once when resizing pauses
+        if self.resize_job is not None:
+            self.after_cancel(self.resize_job)
+        self.resize_job = self.after(80, self._render_current_view)
 
     def _step_wiggle(self):
         if self.active_view != "wiggle" or self.cached_left is None or self.cached_right is None:
@@ -867,7 +922,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             return
         if not self.is_video:
             messagebox.showinfo("Photos convert instantly",
-                                "Photos take ~0.2 s each, so there's no need for a sample. Just press Convert.")
+                                "Photos convert one at a time, so there's no need for a sample. Just press Convert.")
             return
         if self.video_processor is None:
             messagebox.showinfo("Model loading", "The depth model is still loading. Try again in a moment.")
@@ -879,7 +934,12 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         self.output_file_path = os.path.join(base_dir, f"{name}_SAMPLE_5s{SUFFIX_MAP.get(mode, f'_{mode}')}.mp4")
 
         self._set_busy(True)
-        threading.Thread(target=self._quick_test_worker, daemon=True).start()
+        threading.Thread(target=self._quick_test_worker, args=self._job_settings() + (int(self.slider_scrub.get()),),
+                         daemon=True).start()
+
+    def _job_settings(self):
+        """Read widget values on the UI thread; workers must not touch Tk."""
+        return self._gather_params(), self.chk_temporal.get() == 1, self.chk_nvenc.get() == 1
 
     def _make_progress_cb(self, label):
         def on_progress(cur, total, fps_val, eta):
@@ -890,12 +950,8 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             self.after(0, lambda f=fps_val, rem=eta: self.stats_label.configure(text=f"{f:.1f} FPS · ETA {rem}"))
         return on_progress
 
-    def _quick_test_worker(self):
-        p = self._gather_params()
-        temporal = self.chk_temporal.get() == 1
-        nvenc = self.chk_nvenc.get() == 1
+    def _quick_test_worker(self, p, temporal, nvenc, start_frame):
         try:
-            start_frame = int(self.slider_scrub.get())
             success = self.video_processor.process_video(
                 self.input_file_path, self.output_file_path,
                 use_temporal_filter=temporal, use_nvenc=nvenc,
@@ -950,7 +1006,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
 
         self.output_file_path = out_path
         self._set_busy(True)
-        threading.Thread(target=self._conversion_worker, daemon=True).start()
+        threading.Thread(target=self._conversion_worker, args=self._job_settings(), daemon=True).start()
 
     def _cancel_conversion(self):
         self.is_processing = False
@@ -958,10 +1014,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             self.video_processor.cancel()
         self._set_status("Cancelling...")
 
-    def _conversion_worker(self):
-        p = self._gather_params()
-        temporal = self.chk_temporal.get() == 1
-        nvenc = self.chk_nvenc.get() == 1
+    def _conversion_worker(self, p, temporal, nvenc):
         out = self.output_file_path
 
         try:
