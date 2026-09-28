@@ -1,7 +1,6 @@
 """
-VR3D Studio - Graphical User Interface
-Built with CustomTkinter. Multi-threaded live preview, video timeline scrubber,
-switchable 3D preview views, and persistent settings.
+Desktop app. Built with CustomTkinter on top of `engine` (all conversion logic lives there).
+Live preview, video timeline scrubber, switchable 3D preview views, persistent settings.
 """
 
 import json
@@ -21,11 +20,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-from core.io_utils import imread_safe
-from core.depth_estimator import DepthEstimator
-from core.stereo_warper import StereoWarper
-from core.vr180_projector import VR180Projector
-from core.video_processor import VideoProcessor
+from engine import (CATALOG, DEFAULT_MODEL, Converter, OutputFormat, OutputSettings, StereoSettings,
+                    compose, device_label, is_image, is_video, load_model, output_path_for)
+from engine.media import VideoReader, read_image
 
 # Drag & drop is optional: the app still works (browse buttons only) without tkinterdnd2
 try:
@@ -41,25 +38,8 @@ SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".vr3d_studio.json")
 # ponytail: fixed cap, make it follow canvas size if 4K monitors look soft
 PREVIEW_MAX_SIDE = 960
 
-VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi"}
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-
-# VR headset naming suffixes (Pico, Quest, Skybox VR auto-detection)
-SUFFIX_MAP = {
-    "vr180": "_180_SBS",
-    "sbs_full": "_3DH_SBS",
-    "sbs_half": "_3DH_Half_SBS",
-    "anaglyph": "_3D_Anaglyph",
-    "depth_only": "_Depth",
-}
-
-MODELS = {
-    "Hybrid fusion (Depth Anything + Marigold)": "hybrid",
-    "Depth Anything V2 Small (fastest)": "vits",
-    "Depth Anything V2 Base (balanced)": "vitb",
-    "Depth Anything V2 Large (best quality)": "vitl",
-    "Marigold LCM (diffusion depth)": "marigold",
-}
+# Dropdown label -> model id, built from the engine catalog so new models appear automatically
+MODELS = {f"{m.name}  ·  {m.speed}  ·  {m.license}": m.id for m in CATALOG.values()}
 
 MODES = {
     "VR180 3D (Quest / Pico headsets)": "vr180",
@@ -89,6 +69,7 @@ VIEWS = [
     ("right", "Right eye"),
     ("original", "Original"),
 ]
+PREVIEW_FORMATS = {"sbs": OutputFormat.SBS_FULL, "vr180": OutputFormat.VR180, "anaglyph": OutputFormat.ANAGLYPH}
 VIEW_LABELS = {k: v for k, v in VIEWS}
 VIEW_KEYS = {v: k for k, v in VIEWS}
 
@@ -109,7 +90,7 @@ TEXT = ("#1B1D26", "#E8E9F0")
 PREVIEW_BG = "#0B0C10"
 
 DEFAULTS = {
-    "model": "vits",
+    "model": DEFAULT_MODEL,
     "mode": "vr180",
     "profile": "Natural - comfortable (3.5%)",
     "ipd": 0.035,
@@ -166,10 +147,8 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         self.minsize(980, 640)
         self.configure(fg_color=MAIN_BG)
 
-        # Core engines
-        self.depth_estimator = None
-        self.stereo_warper = StereoWarper()
-        self.video_processor = None
+        self.converter = None            # engine.Converter, set once the depth model loads
+        self.cancel_event = threading.Event()
 
         # State
         self.input_file_path = ""
@@ -210,31 +189,28 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
     def _init_backend_async(self):
         """Loads the AI model in a background thread so the UI starts immediately."""
         self._set_status("Loading depth model...")
-        model_key = MODELS.get(self.model_var.get(), "vits")
-        threading.Thread(target=self._load_model_worker, args=(model_key,), daemon=True).start()
+        model_id = MODELS.get(self.model_var.get(), DEFAULT_MODEL)
+        threading.Thread(target=self._load_model_worker, args=(model_id,), daemon=True).start()
 
-    def _load_model_worker(self, model_key):
+    def _load_model_worker(self, model_id):
+        info = CATALOG[model_id]
+        self.after(0, lambda: self._set_status(
+            f"Loading {info.name} (first use downloads ~{info.download_mb} MB, then it's cached)..."))
         try:
-            self.depth_estimator = DepthEstimator(model_size=model_key)
-            self.video_processor = VideoProcessor(self.depth_estimator, self.stereo_warper)
-            gpu = self._detect_gpu()
-            self.after(0, lambda: self.hw_label.configure(text=gpu))
-            self.after(0, lambda: self._set_status("Ready."))
-            self.after(0, self._on_settings_change)
+            converter = Converter(load_model(model_id))
+            hw = device_label()
+            self.after(0, lambda: self._on_model_ready(converter, hw))
         except Exception as exc:
             err_msg = str(exc)
             print(f"[Model load error] {err_msg}")
             self.after(0, lambda msg=err_msg: self._set_status(f"Model error: {msg}"))
 
-    @staticmethod
-    def _detect_gpu() -> str:
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return f"⚡ {torch.cuda.get_device_name(0)} · CUDA"
-        except Exception:
-            pass
-        return "CPU mode (no CUDA GPU found)"
+    def _on_model_ready(self, converter, hw):
+        self.converter = converter
+        self.hw_label.configure(text=hw if "CPU" in hw else f"⚡ {hw}")
+        self._set_status("Ready.")
+        self._invalidate_cache()
+        self._trigger_preview_computation()
 
     # ==========================================
     # UI construction
@@ -500,15 +476,17 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             self.btn_cancel.grid_remove()
             self.btn_start.grid()
 
-    def _gather_params(self):
-        return dict(
-            mode=self._mode_key(),
-            ipd_offset=self.slider_ipd.get(),
-            convergence=self.slider_conv.get(),
-            h_fov=self.slider_fov.get(),
+    # Widget -> engine settings. UI thread only: workers get these snapshots, never widgets.
+    def _stereo_settings(self) -> StereoSettings:
+        return StereoSettings(
+            strength=self.slider_ipd.get(),
+            focus=self.slider_conv.get(),
+            auto_focus=self.chk_auto_conv.get() == 1,
             swap_eyes=self.chk_swap_eyes.get() == 1,
-            auto_convergence=self.chk_auto_conv.get() == 1,
         )
+
+    def _output_settings(self, eye_size: int = 1920) -> OutputSettings:
+        return OutputSettings(OutputFormat(self._mode_key()), vr_fov=self.slider_fov.get(), vr_eye_size=eye_size)
 
     def _offer_open_folder(self, title, message, folder):
         if messagebox.askyesno(title, f"{message}\n\nOpen the output folder?"):
@@ -551,43 +529,43 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         path = paths[0]
         if os.path.isdir(path):
             self._open_folder(path)
-        elif os.path.splitext(path)[1].lower() in VIDEO_EXTS | IMAGE_EXTS:
+        elif is_video(path) or is_image(path):
             self._open_file(path)
         else:
             messagebox.showwarning("Unsupported file", f"Drop a video, image, or folder of images.\n\n{path}")
 
     def _close_video(self):
         if self.video_cap is not None:
-            self.video_cap.release()
+            self.video_cap.close()
             self.video_cap = None
 
     def _open_file(self, file_path):
-        is_video = os.path.splitext(file_path)[1].lower() in VIDEO_EXTS
+        video = is_video(file_path)
 
         # Read first; only switch the app to this file if it actually opens
-        if is_video:
-            cap = cv2.VideoCapture(file_path)
-            ret, frame = cap.read()
-            if not ret:
-                cap.release()
-                messagebox.showerror("Can't open video", f"Could not read frames from:\n{file_path}")
-                return
-        else:
-            frame = imread_safe(file_path)
-            if frame is None:
-                messagebox.showerror("Can't open image", f"Could not read image:\n{file_path}")
-                return
+        try:
+            if video:
+                reader = VideoReader(file_path)
+                frame = reader.read_at(0)
+                if frame is None:
+                    reader.close()
+                    raise ValueError(f"Could not read frames from: {file_path}")
+            else:
+                frame = read_image(file_path)
+        except ValueError as exc:
+            messagebox.showerror("Can't open file", str(exc))
+            return
 
         self._close_video()
         self.input_file_path = file_path
         self.is_folder = False
         self.album_files = []
-        self.is_video = is_video
+        self.is_video = video
 
-        if is_video:
-            self.video_cap = cap  # kept open so scrubbing doesn't reopen the file each time
-            self.total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            self.video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if video:
+            self.video_cap = reader  # kept open so scrubbing doesn't reopen the file each time
+            self.total_video_frames = reader.frame_count
+            self.video_fps = reader.fps
             self.slider_scrub.configure(to=max(1, self.total_video_frames - 1))
             self.slider_scrub.set(0)
             self._update_scrub_label(0)
@@ -623,17 +601,19 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             self._open_folder(folder_path)
 
     def _open_folder(self, folder_path):
-        files = sorted(
-            os.path.join(folder_path, f)
-            for f in os.listdir(folder_path)
-            if os.path.splitext(f)[1].lower() in IMAGE_EXTS
-        )
+        files = sorted(os.path.join(folder_path, f) for f in os.listdir(folder_path) if is_image(f))
         if not files:
             messagebox.showwarning("Empty folder", "No images (.jpg, .png, .webp, .bmp) were found in that folder.")
             return
 
+        def try_read(path):
+            try:
+                return read_image(path)
+            except ValueError:
+                return None
+
         # First readable photo is the live preview
-        first = next((img for img in map(imread_safe, files[:10]) if img is not None), None)
+        first = next((img for img in map(try_read, files[:10]) if img is not None), None)
         if first is None:
             messagebox.showwarning("Unreadable images", "Couldn't read the first images in that folder.")
             return
@@ -668,15 +648,13 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         self.scrub_job = None
         if self.video_cap is None:
             return
-        self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = self.video_cap.read()
-        if ret:
+        frame = self.video_cap.read_at(frame_idx)
+        if frame is not None:
             self._set_source_frame(frame)
 
     def _on_model_changed(self, choice):
-        self._set_status(f"Switching model: {choice}...")
         self._invalidate_cache()
-        threading.Thread(target=self._load_model_worker, args=(MODELS.get(choice, "vits"),), daemon=True).start()
+        threading.Thread(target=self._load_model_worker, args=(MODELS.get(choice, DEFAULT_MODEL),), daemon=True).start()
 
     def _update_fov_visibility(self):
         if self._mode_key() == "vr180":
@@ -741,8 +719,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
     def _on_close(self):
         self._save_settings()
         self._close_video()
-        if self.video_processor and self.is_processing:
-            self.video_processor.cancel()
+        self.cancel_event.set()
         self.destroy()
 
     def _save_settings(self):
@@ -792,7 +769,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
 
     def _trigger_preview_computation(self):
         self.preview_job = None
-        if self.current_frame_bgr is None or self.depth_estimator is None:
+        if self.current_frame_bgr is None or self.converter is None:
             return
         # One worker at a time; _preview_done re-triggers if inputs changed meanwhile
         if self.preview_busy or (self.cached_depth is not None and self.cached_left is not None):
@@ -800,11 +777,12 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         self.preview_busy = True
         # Snapshot every input on the UI thread; the worker never touches Tk widgets or caches
         job = dict(
+            converter=self.converter,
             frame=self.current_frame_bgr,
             depth=self.cached_depth,
             depth_gen=self.depth_gen,
             stereo_gen=self.stereo_gen,
-            params=self._gather_params(),
+            stereo=self._stereo_settings(),
         )
         threading.Thread(target=self._compute_preview_worker, args=(job,), daemon=True).start()
 
@@ -812,17 +790,11 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         result = None
         try:
             t0 = time.time()
-            depth = job["depth"]
+            conv, depth = job["converter"], job["depth"]
             if depth is None:
                 self.after(0, lambda: self._set_status("Estimating depth..."))
-                depth = self.depth_estimator.estimate_depth(job["frame"])
-
-            self.after(0, lambda: self._set_status("Rendering stereo pair..."))
-            p = job["params"]
-            left, right = self.stereo_warper.generate_stereo_pair(
-                job["frame"], depth, ipd_offset=p["ipd_offset"], convergence=p["convergence"],
-                swap_eyes=p["swap_eyes"], auto_convergence=p["auto_convergence"],
-            )
+                depth = conv.depth_model.estimate(job["frame"])
+            left, right = conv.stereo_pair(job["frame"], depth, job["stereo"])
             result = (depth, left, right, time.time() - t0)
         except Exception as exc:
             err_msg = str(exc)
@@ -863,20 +835,14 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             return
         elif view == "original":
             out_bgr = self.current_frame_bgr
-        elif view == "depth":
-            if self.cached_depth is not None:
-                out_bgr = self.depth_estimator.depth_to_colormap(self.cached_depth)
         elif view == "left":
             out_bgr = left
         elif view == "right":
             out_bgr = right
-        elif view == "sbs" and has_pair:
-            out_bgr = self.stereo_warper.create_sbs(left, right, half_sbs=False)
-        elif view == "anaglyph" and has_pair:
-            out_bgr = self.stereo_warper.create_anaglyph(left, right)
-        elif view == "vr180" and has_pair:
-            projector = VR180Projector(output_eye_size=(1080, 1080), h_fov_deg=self.slider_fov.get())
-            out_bgr = projector.project_vr180_sbs(left, right)
+        elif view == "depth" and self.cached_depth is not None:
+            out_bgr = compose(OutputFormat.DEPTH, left, right, self.cached_depth, None)
+        elif view in PREVIEW_FORMATS and has_pair:
+            out_bgr = compose(PREVIEW_FORMATS[view], left, right, self.cached_depth, self._output_settings(eye_size=1080))
 
         if out_bgr is not None:
             self._display_bgr_image(out_bgr)
@@ -912,176 +878,107 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         self.lbl_image.image = photo
 
     # ==========================================
-    # Quick sample test (5 seconds)
+    # Jobs: 5 s sample and full conversion (all work runs through engine.Converter)
     # ==========================================
-    def _start_quick_test(self):
-        if self.is_processing:
-            return
-        if not self.input_file_path or not os.path.exists(self.input_file_path):
-            messagebox.showwarning("No video selected", "Open a video file first to render a quick sample.")
-            return
-        if not self.is_video:
-            messagebox.showinfo("Photos convert instantly",
-                                "Photos convert one at a time, so there's no need for a sample. Just press Convert.")
-            return
-        if self.video_processor is None:
-            messagebox.showinfo("Model loading", "The depth model is still loading. Try again in a moment.")
-            return
-
-        base_dir, file_name = os.path.split(self.input_file_path)
-        name, _ = os.path.splitext(file_name)
-        mode = self._mode_key()
-        self.output_file_path = os.path.join(base_dir, f"{name}_SAMPLE_5s{SUFFIX_MAP.get(mode, f'_{mode}')}.mp4")
-
-        self._set_busy(True)
-        threading.Thread(target=self._quick_test_worker, args=self._job_settings() + (int(self.slider_scrub.get()),),
-                         daemon=True).start()
-
-    def _job_settings(self):
-        """Read widget values on the UI thread; workers must not touch Tk."""
-        return self._gather_params(), self.chk_temporal.get() == 1, self.chk_nvenc.get() == 1
-
-    def _make_progress_cb(self, label):
-        def on_progress(cur, total, fps_val, eta):
-            ratio = cur / max(1, total)
-            self.after(0, lambda r=ratio: self.progress_bar.set(r))
-            self.after(0, lambda c=cur, t=total, p=int(ratio * 100):
-                       self._set_status(f"{label}: frame {c}/{t} ({p}%)"))
-            self.after(0, lambda f=fps_val, rem=eta: self.stats_label.configure(text=f"{f:.1f} FPS · ETA {rem}"))
-        return on_progress
-
-    def _quick_test_worker(self, p, temporal, nvenc, start_frame):
-        try:
-            success = self.video_processor.process_video(
-                self.input_file_path, self.output_file_path,
-                use_temporal_filter=temporal, use_nvenc=nvenc,
-                progress_callback=self._make_progress_cb("Rendering 5 s sample"),
-                start_frame=start_frame, max_frames=int(self.video_fps * 5), **p,
-            )
-            if success:
-                out = self.output_file_path
-                self.after(0, lambda: self._offer_open_folder(
-                    "Sample ready",
-                    f"Your 5-second 3D sample is ready:\n{out}\n\nCheck it in your headset or player.",
-                    os.path.dirname(out)))
-            else:
-                self.after(0, lambda: self._set_status("Sample cancelled."))
-        except Exception as exc:
-            err_msg = str(exc)
-            print(f"[Quick test error] {err_msg}")
-            self.after(0, lambda msg=err_msg: messagebox.showerror("Sample failed", f"Could not render the sample:\n{msg}"))
-        finally:
-            self.after(0, lambda: self._set_busy(False))
-            self.after(0, lambda: self._set_status("Ready."))
-
-    # ==========================================
-    # Conversion
-    # ==========================================
-    def _start_conversion(self):
-        if self.is_processing:
-            return
+    def _check_ready(self) -> bool:
         if not self.input_file_path or not os.path.exists(self.input_file_path):
             messagebox.showwarning("Nothing to convert", "Open a video, photo, or photo folder first.")
-            return
-        if self.video_processor is None:
+            return False
+        if self.converter is None:
             messagebox.showinfo("Model loading", "The depth model is still loading. Try again in a moment.")
-            return
+            return False
+        return True
 
+    def _start_job(self, kind: str, dst: str, **extra):
+        """Snapshot settings on the UI thread, then run the job on a worker thread."""
+        job = dict(kind=kind, src=self.input_file_path, dst=dst, converter=self.converter,
+                   stereo=self._stereo_settings(), output=self._output_settings(),
+                   smooth=self.chk_temporal.get() == 1, nvenc=self.chk_nvenc.get() == 1, **extra)
+        self.cancel_event.clear()
+        self._set_busy(True)
+        threading.Thread(target=self._job_worker, args=(job,), daemon=True).start()
+
+    def _start_quick_test(self):
+        if self.is_processing or not self._check_ready():
+            return
+        if not self.is_video:
+            messagebox.showinfo("Photos convert quickly",
+                                "There's no need for a sample with photos. Just press Convert.")
+            return
+        root, _ = os.path.splitext(output_path_for(self.input_file_path, OutputFormat(self._mode_key())))
+        self._start_job("sample", root + "_SAMPLE_5s.mp4",
+                        start_frame=int(self.slider_scrub.get()), max_frames=int(self.video_fps * 5))
+
+    def _start_conversion(self):
+        if self.is_processing or not self._check_ready():
+            return
         if self.is_folder:
-            out_path = filedialog.askdirectory(title="Choose where to save the 3D photos",
-                                               initialdir=self.input_file_path)
+            dst = filedialog.askdirectory(title="Choose where to save the 3D photos", initialdir=self.input_file_path)
+            kind = "folder"
         else:
-            base_dir, file_name = os.path.split(self.input_file_path)
-            name, ext = os.path.splitext(file_name)
-            mode = self._mode_key()
-            out_path = filedialog.asksaveasfilename(
+            suggested = output_path_for(self.input_file_path, OutputFormat(self._mode_key()),
+                                        ext=".mp4" if self.is_video else None)
+            dst = filedialog.asksaveasfilename(
                 title="Save output as",
-                initialdir=base_dir,
-                initialfile=f"{name}{SUFFIX_MAP.get(mode, f'_{mode}')}{ext}",
+                initialdir=os.path.dirname(suggested),
+                initialfile=os.path.basename(suggested),
                 defaultextension=".mp4" if self.is_video else ".jpg",
                 filetypes=[("Video", "*.mp4")] if self.is_video else [("Image", "*.jpg *.png")],
             )
-        if not out_path:
-            return
-
-        self.output_file_path = out_path
-        self._set_busy(True)
-        threading.Thread(target=self._conversion_worker, args=self._job_settings(), daemon=True).start()
+            kind = "video" if self.is_video else "image"
+        if dst:
+            self._start_job(kind, dst)
 
     def _cancel_conversion(self):
-        self.is_processing = False
-        if self.video_processor:
-            self.video_processor.cancel()
+        self.cancel_event.set()
         self._set_status("Cancelling...")
 
-    def _conversion_worker(self, p, temporal, nvenc):
-        out = self.output_file_path
+    def _progress_cb(self, label: str, unit: str):
+        def on_progress(p):
+            eta = time.strftime("%M:%S", time.gmtime(int(p.eta_seconds)))
+            self.after(0, lambda: self.progress_bar.set(p.fraction))
+            self.after(0, lambda: self._set_status(f"{label}: {unit} {p.done}/{p.total} ({p.fraction:.0%})"))
+            self.after(0, lambda: self.stats_label.configure(text=f"{p.rate:.1f} {unit}s/s · ETA {eta}"))
+        return on_progress
 
+    def _job_worker(self, job):
+        conv, src, dst = job["converter"], job["src"], job["dst"]
+        stereo, output, cancel = job["stereo"], job["output"], self.cancel_event
         try:
-            if self.is_folder:
-                self._convert_album(p, out)
-            elif not self.is_video:
+            if job["kind"] == "folder":
+                ok, bad = conv.convert_folder(src, dst, stereo, output, cancel=cancel,
+                                              progress=self._progress_cb("Converting album", "photo"))
+                done = not cancel.is_set()
+                msg = f"Converted {len(ok)} photos into:\n{dst}" + (f"\n\n{len(bad)} files couldn't be read and were skipped." if bad else "")
+                folder = dst
+            elif job["kind"] == "image":
                 self.after(0, lambda: self._set_status("Converting image..."))
-                self.video_processor.process_image(self.input_file_path, out, **p)
-                self.after(0, lambda: self.progress_bar.set(1.0))
-                self.after(0, lambda: self._offer_open_folder(
-                    "Done", f"Your 3D image is ready:\n{out}", os.path.dirname(out)))
+                conv.convert_image(src, dst, stereo, output)
+                done, msg, folder = True, f"Your 3D image is ready:\n{dst}", os.path.dirname(dst)
             else:
-                success = self.video_processor.process_video(
-                    self.input_file_path, out,
-                    use_temporal_filter=temporal, use_nvenc=nvenc,
-                    progress_callback=self._make_progress_cb("Converting"), **p,
-                )
-                if success:
-                    self.after(0, lambda: self._offer_open_folder(
-                        "Done", f"Your 3D video is ready:\n{out}", os.path.dirname(out)))
-                else:
-                    self.after(0, lambda: self._set_status("Conversion cancelled."))
+                sample = job["kind"] == "sample"
+                done = conv.convert_video(
+                    src, dst, stereo, output, smooth=job["smooth"], prefer_nvenc=job["nvenc"], cancel=cancel,
+                    start_frame=job.get("start_frame", 0), max_frames=job.get("max_frames"),
+                    progress=self._progress_cb("Rendering 5 s sample" if sample else "Converting", "frame"))
+                msg = (f"Your 5-second 3D sample is ready:\n{dst}\n\nCheck it in your headset or player." if sample
+                       else f"Your 3D video is ready:\n{dst}")
+                folder = os.path.dirname(dst)
+
+            if done:
+                self.after(0, lambda: self.progress_bar.set(1.0))
+                self.after(0, lambda: self._offer_open_folder("Done", msg, folder))
+            else:
+                self.after(0, lambda: self._set_status("Cancelled."))
         except Exception as exc:
             err_msg = str(exc)
-            print(f"[Conversion error] {err_msg}")
-            self.after(0, lambda msg=err_msg: messagebox.showerror("Conversion failed", f"Could not convert:\n{msg}"))
+            print(f"[Job error] {err_msg}")
+            self.after(0, lambda: messagebox.showerror("Conversion failed", f"Could not convert:\n{err_msg}"))
         finally:
             self.after(0, lambda: self._set_busy(False))
-            self.after(0, lambda: self._set_status("Ready."))
-
-    def _convert_album(self, p, out_dir):
-        total = len(self.album_files)
-        os.makedirs(out_dir, exist_ok=True)
-        suffix = SUFFIX_MAP.get(p["mode"], f"_{p['mode']}")
-        start_time = time.time()
-        success_count = 0
-
-        for idx, in_img_path in enumerate(self.album_files):
-            if not self.is_processing:
-                break
-
-            root, ext = os.path.splitext(os.path.basename(in_img_path))
-            clean_root = root if root.endswith(suffix) else f"{root}{suffix}"
-            out_img_path = os.path.join(out_dir, f"{clean_root}{ext}")
-
-            ratio = idx / max(1, total)
-            self.after(0, lambda r=ratio: self.progress_bar.set(r))
-            self.after(0, lambda i=idx + 1, pct=int(ratio * 100):
-                       self._set_status(f"Converting album: photo {i}/{total} ({pct}%)"))
-
-            try:
-                self.video_processor.process_image(in_img_path, out_img_path, **p)
-                success_count += 1
-            except Exception as img_err:
-                print(f"[Album error on {os.path.basename(in_img_path)}]: {img_err}")
-
-            rate = (idx + 1) / max(0.001, time.time() - start_time)
-            eta = time.strftime("%M:%S", time.gmtime(int((total - idx - 1) / max(0.001, rate))))
-            self.after(0, lambda f=rate, rem=eta: self.stats_label.configure(text=f"{f:.1f} photos/s · ETA {rem}"))
-
-        if self.is_processing:
-            self.after(0, lambda: self.progress_bar.set(1.0))
-            self.after(0, lambda: self._offer_open_folder(
-                "Done", f"Converted {success_count} of {total} photos into:\n{out_dir}", out_dir))
-        else:
-            self.after(0, lambda: self._set_status("Album conversion cancelled."))
-
+            self.after(0, lambda: self.stats_label.configure(text=""))
+            if not cancel.is_set():
+                self.after(0, lambda: self._set_status("Ready."))
 
 def main():
     app = VR3DStudioApp()

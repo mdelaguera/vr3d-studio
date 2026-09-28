@@ -1,14 +1,13 @@
+# Install PyTorch with CUDA first for GPU speed (see README), then: pip install -r requirements.txt
 torch>=2.2.0
-torchvision>=0.17.0
 opencv-python>=4.8.0
 numpy>=1.24.0
 pillow>=10.0.0
-scipy>=1.11.0
 customtkinter>=5.2.0
-requests>=2.31.0
-tqdm>=4.66.0
 tkinterdnd2>=0.4.2
-# Hybrid / Marigold depth models
+transformers>=4.45.0
+# Marigold LCM / Hybrid depth models
 diffusers>=0.30.0
-transformers>=4.40.0
 accelerate>=0.30.0
+# Tests
+pytest>=8.0

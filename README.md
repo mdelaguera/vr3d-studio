@@ -1,164 +1,124 @@
 # VR3D Studio 🥽
-### Open-Source 2D to 3D SBS & VR180 AI Converter (Owl3D Alternative)
+### Turn 2D photos and videos into 3D and VR180. Free, local, and private.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.2%2B%20CUDA-ee4c2c.svg)](https://pytorch.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GPU](https://img.shields.io/badge/GPU%20Acceleration-NVIDIA%20NVENC-76b900.svg)](https://developer.nvidia.com/video-encode-decode-gpu-support-matrix)
-[![Donate with Revolut](https://img.shields.io/badge/Donate-Revolut%20%40grezoo-0075eb.svg?style=flat&logo=revolut&logoColor=white)](https://revolut.me/grezoo)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Models: open source](https://img.shields.io/badge/models-Apache--2.0-2ea44f.svg)](#-depth-models)
 
-**VR3D Studio** is an open-source, 100% offline, watermark-free desktop application and CLI tool that converts regular 2D videos, photos, and photo albums into stereoscopic 3D Side-by-Side (SBS) and immersive VR180 formats for VR headsets (Pico 4, Meta Quest 2/3/Pro, Apple Vision Pro, Skybox VR).
+VR3D Studio converts regular photos, videos, and whole photo albums into stereoscopic 3D:
+**VR180** for headsets (Meta Quest, Pico, Apple Vision Pro, Skybox, DeoVR), **side-by-side** for
+3D TVs and monitors, and **anaglyph** for red/cyan glasses.
 
-Built as a high-performance, free alternative to proprietary subscription tools like Owl3D.
+Everything runs on your own computer. No account, no upload, no watermark.
 
 ---
 
 ## ✨ Features
 
-- 🦉 **Unlimited & Free (Owl3D Alternative):** No credits, no subscriptions, no cloud queue, no watermarks. Runs 100% locally on your machine.
-- 🧠 **SOTA Depth AI:** Powered by **Depth Anything V2** (`vits`, `vitb`, and `vitl`) for monocular depth estimation with edge preservation.
-- 🎯 **Auto-Convergence (Subject-Locking):** Dynamically locks convergence (zero-disparity plane) onto the primary foreground subject, eliminating double body contours and eye divergence strain.
-- 👁️ **Wiggle 3D Preview (Glasses-Free):** Interactive GUI preview that oscillates between left and right eye views, allowing you to clearly see depth layers on a standard 2D PC monitor before converting.
-- ⚡ **5-Second Sample Quick-Test:** Generate a quick 5-second 3D sample clip from any point in a video in seconds to test in your VR headset before committing to a full-length render.
-- 📁 **Batch Photo Album Converter:** Process entire folders of family photos, travel albums, or wallpapers into VR180/SBS 3D in seconds (~0.1–0.2s per photo on modern GPUs).
-- ⚡ **NVIDIA NVENC Hardware Encoding:** Direct raw NVENC streaming (`hevc_nvenc`) for export speeds with audio passthrough.
-- 🌐 **Full Headset Compatibility:**
-  - Auto-injects Google Spatial Media VR180 equirectangular spherical metadata tags.
-  - Automatically appends standard naming tags (`_180_sbs`, `_3D_full_sbs`) so players like **Pico Video / Gallery**, **Meta Quest TV**, **Skybox VR**, **4X-VR**, and **DeoVR** detect and play them in 3D without manual menu adjustments.
-- 🛡️ **Unicode / International Path Safe:** Robust Windows file handling supporting accented and international file names.
+- 🔒 **Private by design.** Your files never leave your machine.
+- 🧠 **Open-source depth AI.** Choose between fast and high-quality models, all Apache-2.0.
+- 🎯 **Auto focus.** Anchors the background at screen depth and lets subjects pop forward, avoiding
+  ghosted edges and eye strain.
+- 👁️ **Wiggle 3D preview.** See the depth on a normal monitor before you convert.
+- ⚡ **5-second samples.** Render a short clip from any point in a video to check it in your headset.
+- 📁 **Photo albums.** Convert a whole folder in one go; unreadable files are skipped, not fatal.
+- 🎞️ **Fast video pipeline.** Decoding, AI, and encoding run in parallel; NVIDIA NVENC is used
+  automatically when available; audio is kept.
+- 🌐 **Headset-ready files.** Output names (`_180_SBS`, `_3DH_SBS`, …) and stereo metadata let
+  players detect the layout automatically.
 
 ---
 
-## 🖥️ System Requirements
+## 🚀 Install (Windows)
 
-- **OS:** Windows 10 / 11 (64-bit) or Linux.
-- **GPU:** NVIDIA GPU with CUDA support (RTX 30xx, 40xx, 50xx series recommended; tested on RTX 5070 12GB).
-- **FFmpeg:** Installed and added to system PATH.
-- **Python:** 3.10 - 3.14.
+1. Install **Python 3.10+** and **FFmpeg** (`winget install Gyan.FFmpeg`).
+2. Get the code:
+   ```powershell
+   git clone https://github.com/mdelaguera/vr3d-studio.git
+   cd vr3d-studio
+   ```
+3. Install PyTorch **with CUDA** for GPU speed (pick your CUDA version on [pytorch.org](https://pytorch.org/get-started/locally/)):
+   ```powershell
+   pip install torch --index-url https://download.pytorch.org/whl/cu128
+   ```
+4. Install the rest: `pip install -r requirements.txt`
+5. Start: double-click `run_converter.bat` or run `python main.py`.
 
----
-
-## 🚀 Quick Start
-
-### 1. Clone repository
-```bash
-git clone https://github.com/mdelaguera/vr3d-studio.git
-cd vr3d-studio
-```
-
-### 2. Install dependencies
-```bash
-pip install -r requirements.txt
-```
-> **Note for PyTorch CUDA:** Ensure you install the CUDA-enabled PyTorch build for your system (e.g. from [pytorch.org](https://pytorch.org/get-started/locally/)).
-
-### 3. Launch GUI
-Double-click `run_converter.bat` or run:
-```bash
-python main.py
-```
+Models download automatically the first time you pick one and are cached by Hugging Face.
 
 ---
 
-## 🤖 AI Models & Automatic Hugging Face Download
+## 🕹️ Using the app
 
-VR3D Studio utilizes the state-of-the-art **Depth Anything V2** monocular depth estimation neural network.
+1. **Open a source:** drag a video, photo, or folder onto the window, or use **Open file** (`Ctrl+O`) / **Open folder** (`Ctrl+Shift+O`).
+2. **Pick model & format:** VR180 for headsets, Full SBS for 3D TVs. Photos switch to Full SBS automatically.
+3. **Tune the 3D effect:** start from a preset (Soft → Extreme), then adjust *Depth strength* and *Focus plane*.
+4. **Preview:** **Wiggle 3D** shows depth without glasses. Keys `1`–`8` switch views, `F5` refreshes.
+5. **Videos:** scrub to a scene and click **5 s sample** to test before the full render.
+6. **Convert** (`Ctrl+Enter`). `Esc` cancels.
 
-**You do NOT need to download models manually or register for API keys.** 
-When you launch the app or select a model in the dropdown, the software **automatically downloads** the verified official weights directly from the [Depth Anything V2 Hugging Face repository](https://huggingface.co/depth-anything) into your local `weights/` folder with a live progress bar:
-
-| Model | Encoder | Download Size | Best For | Typical Speed (RTX 5070) |
-| :--- | :--- | :--- | :--- | :--- |
-| **`vits`** (Small) | ViT-S | **~95 MB** | Real-time preview, quick draft conversions, laptops | **~100+ FPS** |
-| **`vitb`** (Base) | ViT-B | **~390 MB** | Balanced daily video & photo conversions | **~50 FPS** |
-| **`vitl`** (Large) | ViT-L | **~1.28 GB** | Maximum fidelity, fine hair/limb separation, cinematic quality | **~25-30 FPS** |
-
-*All downloaded weights are cached locally in the `weights/` folder and will never be re-downloaded.*
+Settings are remembered between sessions.
 
 ---
 
-## 🕹️ GUI Usage
+## 🧠 Depth models
 
-1. **Open a source:** Drag a video, photo, or folder onto the window, or click **Open file** (video or photo, `Ctrl+O`) or **Open folder** (a whole photo album, `Ctrl+Shift+O`).
-2. **Pick model & format:** Choose **VR180 3D** for headsets or **Full SBS 3D** for 3D TVs/monitors. Photos automatically switch to Full SBS.
-3. **Tune the 3D effect:** Pick a preset (**Soft**, **Natural**, **Deep**, **Pop-out**, **Extreme**) or fine-tune *Depth strength* and *Focus plane*.
-4. **Check depth on a normal monitor:** The **Wiggle 3D** view flips between the two eyes so you can see depth without glasses. Keys `1`–`8` switch preview views, `F5` refreshes.
-5. **Test before a full render (videos):** Scrub to a spot and click **5 s sample**.
-6. **Convert:** Click **Convert** (`Ctrl+Enter`). `Esc` cancels. When it finishes, you can open the output folder straight from the dialog.
+Every model we ship is licensed for commercial use.
 
-Your settings (model, format, sliders, toggles, light/dark theme) are remembered between sessions in `~/.vr3d_studio.json`.
+| Model | Speed | Download | License | Best for |
+|---|---|---|---|---|
+| **Depth Anything V2 Small** (default) | fast | ~100 MB | Apache-2.0 | Video, everyday use |
+| **DPT-Hybrid (MiDaS)** | fast | ~490 MB | Apache-2.0 | Smooth landscapes |
+| **Marigold LCM** | slow | ~1.7 GB | Apache-2.0 | Detailed photos |
+| **Hybrid** (Depth Anything + Marigold) | slow | ~1.8 GB | Apache-2.0 | Maximum quality photos |
+
+`python main.py --list-models` prints the same list.
 
 ---
-## ⌨️ Command Line (CLI) Usage
 
-For automated or headless processing:
+## ⌨️ Command line
 
 ```bash
-# Convert a video to VR180 SBS with NVENC acceleration:
-python main.py -i "input_video.mp4" -m vr180 --fov 110
-
-# Batch convert an entire folder of photos to VR180 3D:
-python main.py -i "C:/Photos/Vacation" -o "C:/Photos/Vacation_3D" -m vr180
-
-# Convert image to Full Side-by-Side 3D:
-python main.py -i "photo.jpg" -m sbs_full --ipd 0.035
-
-# Options:
-#   --mode, -m        vr180 | sbs_full | sbs_half | anaglyph | depth_only
-#   --model           vits (fast) | vitb (balanced) | vitl (quality)
-#   --ipd             3D strength (default: 0.035, same as GUI "Natural")
-#   --fov             VR180 horizontal FOV (default: 110.0)
-#   --swap-eyes       Swap Left and Right eye channels
-#   --no-nvenc        Use CPU x264 instead of NVIDIA NVENC
+python main.py video.mp4 -m vr180                      # video to VR180
+python main.py "C:/Photos/Trip" -o "C:/Photos/Trip_3D" # whole album (Full SBS)
+python main.py photo.jpg --model hybrid --strength 0.05
 ```
+
+| Option | Meaning |
+|---|---|
+| `-m, --mode` | `vr180`, `sbs_full` (default), `sbs_half`, `anaglyph`, `depth_only` |
+| `--model` | `da2-small` (default), `dpt-hybrid`, `marigold-lcm`, `hybrid` |
+| `--strength` | 3D strength, default `0.035` ("Natural") |
+| `--focus` | Fixed focus plane 0.1–0.9 (default: automatic) |
+| `--fov` | VR180 field of view, default `110` |
+| `--swap-eyes`, `--no-nvenc`, `--no-smoothing` | Switches |
 
 ---
 
-## 🗂️ Project Structure
+## 🗂️ Project structure
 
 ```
-vr3d-studio/
-├── run_converter.bat           # 1-click launcher for Windows
-├── main.py                     # Entry point (GUI + CLI)
-├── requirements.txt            # Python dependencies
-├── core/
-│   ├── depth_estimator.py      # Depth Anything V2 AI engine
-│   ├── stereo_warper.py        # Disparity remap with Auto-Convergence
-│   ├── vr180_projector.py      # Equirectangular 180° dome projector
-│   ├── vr_metadata.py          # Spatial Media VR180 MP4 metadata injector
-│   ├── temporal_filter.py      # Anti-flicker temporal consistency filter
-│   ├── video_processor.py      # NVENC streaming pipeline & snippet cutter
-│   ├── io_utils.py             # Unicode-safe image/video I/O
-│   └── depth_anything_v2/      # Model architecture
-├── gui/
-│   └── app.py                  # CustomTkinter UI (light/dark, Wiggle 3D, presets)
-└── weights/                    # Cached AI weights (auto-downloaded)
+engine/            conversion engine (no UI; used by the app, CLI, and future cloud workers)
+  settings.py        output formats, stereo settings, file naming
+  depth/             model catalog + backends (transformers, diffusers, hybrid)
+  stereo.py          depth -> left/right eyes (two-layer warp, push-pull hole fill)
+  vr180.py           equirectangular projection (cached remap tables)
+  temporal.py        motion-adaptive depth smoothing for video
+  media.py           image/video IO, threaded ffmpeg encoder, audio mux
+  pipeline.py        Converter: frame / image / video / folder
+  cli.py             command line
+gui/app.py         desktop app (CustomTkinter)
+tests/             pytest suite (`pytest`; `pytest -m model` also tests a real model)
 ```
 
 ---
 
 ## 🙏 Credits
 
-This project is a fork of [grezoo/vr3d-studio](https://github.com/grezoo/vr3d-studio). If the original saved you from an expensive subscription, consider supporting its author via Revolut:
-
-[![Donate with Revolut](https://img.shields.io/badge/Donate%20via%20Revolut-%40grezoo-0075eb.svg?style=for-the-badge&logo=revolut&logoColor=white)](https://revolut.me/grezoo)
-
-* **Revolut Revtag:** `@grezoo`
-* **Direct link:** [revolut.me/grezoo](https://revolut.me/grezoo)
-
----
-
-## 🌐 The Grezoo Open-Source Media Ecosystem
-
-Discover the complementary tools designed for VR creators and mobile media:
-
-* 🥽 [**VR-YouTube-3D-Downloader**](https://github.com/grezoo/VR-YouTube-3D-Downloader) – 100% Free (#Free) & Ad-Free (#AdFree) 4K/8K 3D VR and MP4/MP3 YouTube downloader with RTX NVENC EAC mesh conversion.
-* 📱 [**Mobile-media-Converter**](https://github.com/grezoo/Mobile-media-Converter) – High-speed 2D mobile video compressor & phone storage optimizer.
-* 🌌 [**vr3d-studio**](https://github.com/grezoo/vr3d-studio) – Open-source 2D to 3D stereoscopic SBS & VR180 AI converter.
-
----
+Started as a fork of [grezoo/vr3d-studio](https://github.com/grezoo/vr3d-studio) and since rebuilt.
+Depth models by the [Depth Anything](https://github.com/DepthAnything/Depth-Anything-V2),
+[Marigold](https://marigoldmonodepth.github.io/), and [MiDaS/DPT](https://github.com/isl-org/MiDaS) teams.
 
 ## 📜 License
 
-This project is licensed under the [MIT License](LICENSE).
-Depth Anything V2 is licensed under the Apache 2.0 license.
+[MIT](LICENSE). Model weights are downloaded from Hugging Face under their own licenses (all Apache-2.0).

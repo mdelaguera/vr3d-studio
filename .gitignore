@@ -30,24 +30,17 @@ venv/
 env/
 ENV/
 
-# Model weights (auto-downloaded at runtime, do not commit multi-gigabyte binaries)
-weights/*.pth
-weights/*.pt
-!weights/.gitkeep
-
 # Temporary & Output media files
 *.mp4
 *.mkv
 *.mov
 *.avi
-*.temp_video.mp4
+*.video.mp4
 *.npy
 *.jpg
 *.jpeg
 *.png
 *.gif
-tests/output/*
-!tests/output/.gitkeep
 _3D_album/
 
 # Operating System Files
@@ -62,4 +55,4 @@ $RECYCLE.BIN/
 .idea/
 *.swp
 *.swo
-weights/*.part
+.pytest_cache/
