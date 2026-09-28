@@ -1,6 +1,6 @@
-# VR 3D Platform — Design
+# Any2VR Platform — Design
 
-Status: approved 2026-09-27 (owner: mdelaguera). Product name TBD (rebrand pending).
+Status: approved 2026-09-27 (owner: mdelaguera). Product name: Any2VR (chosen 2026-09-28).
 
 ## Goals
 

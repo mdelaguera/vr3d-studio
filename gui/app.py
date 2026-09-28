@@ -32,7 +32,8 @@ except ImportError:
     TkinterDnD = None
     DND_BASES = ()
 
-SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".vr3d_studio.json")
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".any2vr.json")
+LEGACY_SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".vr3d_studio.json")  # pre-rename
 
 # Preview runs on a downscaled copy (the canvas is smaller anyway); exports use full resolution.
 # ponytail: fixed cap, make it follow canvas size if 4K monitors look soft
@@ -106,8 +107,9 @@ DEFAULTS = {
 
 def load_settings() -> dict:
     settings = dict(DEFAULTS)
+    path = SETTINGS_PATH if os.path.exists(SETTINGS_PATH) else LEGACY_SETTINGS_PATH  # carry over pre-rename prefs
     try:
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8") as fh:
             saved = json.load(fh)
         settings.update({k: v for k, v in saved.items() if k in DEFAULTS})
     except (OSError, ValueError):
@@ -128,7 +130,7 @@ def label_for(mapping: dict, value) -> str:
     return next(k for k, v in mapping.items() if v == value)
 
 
-class VR3DStudioApp(ctk.CTk, *DND_BASES):
+class Any2VRApp(ctk.CTk, *DND_BASES):
     def __init__(self):
         self.settings = load_settings()
         ctk.set_appearance_mode(self.settings["appearance"])
@@ -142,7 +144,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
             except Exception as exc:
                 print(f"[Drag & drop unavailable] {exc}")
 
-        self.title("VR3D Studio - 2D to 3D SBS & VR180 Converter")
+        self.title("Any2VR - Turn any photo or video into 3D & VR")
         self.geometry("1280x800")
         self.minsize(980, 640)
         self.configure(fg_color=MAIN_BG)
@@ -277,7 +279,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
         # --- Header ---
         header = ctk.CTkFrame(sidebar, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 10))
-        ctk.CTkLabel(header, text="VR3D Studio", font=ctk.CTkFont(size=22, weight="bold"),
+        ctk.CTkLabel(header, text="Any2VR", font=ctk.CTkFont(size=22, weight="bold"),
                      text_color=TEXT).pack(anchor="w")
         ctk.CTkLabel(header, text="Turn 2D photos & videos into 3D / VR180",
                      font=ctk.CTkFont(size=12), text_color=MUTED).pack(anchor="w")
@@ -981,7 +983,7 @@ class VR3DStudioApp(ctk.CTk, *DND_BASES):
                 self.after(0, lambda: self._set_status("Ready."))
 
 def main():
-    app = VR3DStudioApp()
+    app = Any2VRApp()
     app.mainloop()
 
 

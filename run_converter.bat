@@ -1,8 +1,8 @@
 @echo off
-title VR3D Studio - 2D to 3D SBS & VR180 Converter
+title Any2VR - Turn any photo or video into 3D & VR
 cd /d "%~dp0"
 echo ========================================================
-echo   VR3D Studio - AI 2D to 3D SBS and VR180 Converter
+echo   Any2VR - Turn any photo or video into 3D and VR
 echo   NVIDIA CUDA accelerated
 echo ========================================================
 echo.

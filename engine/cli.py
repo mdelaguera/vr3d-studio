@@ -10,7 +10,7 @@ from . import (CATALOG, DEFAULT_MODEL, Converter, OutputFormat, OutputSettings, 
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="main.py", description="Convert 2D photos and videos to 3D (SBS, VR180, anaglyph).")
+    p = argparse.ArgumentParser(prog="main.py", description="Any2VR: convert 2D photos and videos to 3D (SBS, VR180, anaglyph).")
     p.add_argument("input", nargs="?", help="Photo, video, or folder of photos (omit to open the app)")
     p.add_argument("-i", "--input", dest="input_flag", help=argparse.SUPPRESS)  # old flag, still accepted
     p.add_argument("-o", "--output", help="Output file (or folder for albums). Default: next to the input")

@@ -1,11 +1,11 @@
-# VR3D Studio 🥽
+# Any2VR 🥽
 ### Turn 2D photos and videos into 3D and VR180. Free, local, and private.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Models: open source](https://img.shields.io/badge/models-Apache--2.0-2ea44f.svg)](#-depth-models)
 
-VR3D Studio converts regular photos, videos, and whole photo albums into stereoscopic 3D:
+Any2VR converts regular photos, videos, and whole photo albums into stereoscopic 3D:
 **VR180** for headsets (Meta Quest, Pico, Apple Vision Pro, Skybox, DeoVR), **side-by-side** for
 3D TVs and monitors, and **anaglyph** for red/cyan glasses.
 
