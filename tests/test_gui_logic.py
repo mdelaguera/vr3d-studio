@@ -73,12 +73,27 @@ def test_nvidia_gpu_with_cpu_only_pytorch_gets_cuda_fix(monkeypatch):
     assert "RTX 5070" in r.issues[0].title and "cu128" in r.issues[0].fix_command
 
 
-def test_amd_gpu_is_named_and_gets_no_cuda_advice(monkeypatch):
-    _fake_env(monkeypatch, "cpu", ["Meta Virtual Monitor", "AMD Radeon RX 6800 XT"], encoder="hevc_amf")
+def test_amd_gpu_without_directml_gets_directml_fix_not_cuda(monkeypatch):
+    _fake_env(monkeypatch, "cpu", ["AMD Radeon RX 6800 XT"], encoder="hevc_amf")
     r = system_check.check()
     issue = r.issues[0]
-    assert "AMD Radeon RX 6800 XT" in issue.title and not issue.fix_command
+    assert "AMD Radeon RX 6800 XT" in issue.title
+    assert "onnxruntime-directml" in issue.fix_command and "cu128" not in issue.fix_command
     assert r.encoder == "AMD GPU"
+
+
+def test_amd_gpu_with_directml_is_healthy(monkeypatch):
+    from engine import CATALOG
+    _fake_env(monkeypatch, "dml", ["AMD Radeon RX 6800 XT"], encoder="hevc_amf")
+    r = system_check.check()
+    assert r.has_gpu and not r.issues and r.device_label == "AMD Radeon RX 6800 XT · DirectML"
+    assert r.runs_on_gpu(CATALOG["da2-small"]) and not r.runs_on_gpu(CATALOG["marigold-lcm"])
+
+
+def test_nvidia_on_directml_is_nudged_towards_cuda(monkeypatch):
+    _fake_env(monkeypatch, "dml", ["NVIDIA GeForce RTX 5070"], encoder="hevc_nvenc")
+    r = system_check.check()
+    assert r.has_gpu and "cu128" in r.issues[0].fix_command and not r.issues[0].blocking
 
 
 def test_cpu_only_machine_gets_advice_without_a_fix_command(monkeypatch):

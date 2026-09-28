@@ -6,6 +6,9 @@ pillow>=10.0.0
 customtkinter>=5.2.0
 tkinterdnd2>=0.4.2
 transformers>=4.45.0
+# GPU AI on AMD / Intel / any DirectX 12 GPU (Windows); plain ONNX Runtime elsewhere
+onnxruntime-directml>=1.20; sys_platform == "win32"
+onnxruntime>=1.20; sys_platform != "win32"
 # Marigold LCM / Hybrid depth models
 diffusers>=0.30.0
 accelerate>=0.30.0

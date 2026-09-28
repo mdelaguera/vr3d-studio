@@ -27,12 +27,14 @@ class ModelInfo:
     download_mb: int
     speed: str           # "fast" | "medium" | "slow" (relative, per frame)
     blurb: str
+    onnx: str = ""       # "repo:file" ONNX export, used for DirectML GPUs (AMD / Intel / any DX12 on Windows)
 
 
 CATALOG = {
     m.id: m for m in [
         ModelInfo("da2-small", "Depth Anything V2 Small", "depth-anything/Depth-Anything-V2-Small-hf",
-                  "Apache-2.0", True, 100, "fast", "Fast and sharp. Great default for video."),
+                  "Apache-2.0", True, 100, "fast", "Fast and sharp. Great default for video.",
+                  onnx="onnx-community/depth-anything-v2-small:onnx/model.onnx"),
         ModelInfo("dpt-hybrid", "DPT-Hybrid (MiDaS)", "Intel/dpt-hybrid-midas",
                   "Apache-2.0", True, 490, "fast", "Classic, smooth depth. Good for landscapes."),
         ModelInfo("marigold-lcm", "Marigold LCM", "prs-eth/marigold-depth-lcm-v1-0",
@@ -44,23 +46,31 @@ CATALOG = {
 DEFAULT_MODEL = "da2-small"
 
 
+def directml_available() -> bool:
+    try:
+        import onnxruntime
+        return "DmlExecutionProvider" in onnxruntime.get_available_providers()
+    except ImportError:
+        return False
+
+
 def pick_device() -> str:
+    """cuda | mps | dml | cpu. `dml` = PyTorch has no GPU, but ONNX Runtime can use one via DirectML."""
     import torch
     if torch.cuda.is_available():
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
-    return "cpu"
+    return "dml" if directml_available() else "cpu"
 
 
 def device_label() -> str:
     """Human-readable description of where models will run."""
-    import torch
-    if torch.cuda.is_available():
+    device = pick_device()
+    if device == "cuda":
+        import torch
         return f"{torch.cuda.get_device_name(0)} · CUDA"
-    if pick_device() == "mps":
-        return "Apple GPU · Metal"
-    return "CPU (no GPU acceleration)"
+    return {"mps": "Apple GPU · Metal", "dml": "GPU · DirectML"}.get(device, "CPU (no GPU acceleration)")
 
 
 def load_model(model_id: str = DEFAULT_MODEL, device: str = None) -> DepthModel:
@@ -71,6 +81,11 @@ def load_model(model_id: str = DEFAULT_MODEL, device: str = None) -> DepthModel:
     if model_id == "hybrid":
         from .hybrid import HybridDepth
         return HybridDepth(info, load_model("da2-small", device), load_model("marigold-lcm", device))
+    if device == "dml":
+        if info.onnx:
+            from .onnx import OnnxDepth
+            return OnnxDepth(info)
+        device = "cpu"  # no ONNX export for this model: PyTorch on CPU
     if model_id == "marigold-lcm":
         from .marigold import MarigoldDepth
         return MarigoldDepth(info, device)

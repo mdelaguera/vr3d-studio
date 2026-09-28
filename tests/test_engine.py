@@ -158,6 +158,17 @@ def test_video_cancel_leaves_no_files(tmp_path):
 
 
 @pytest.mark.model
+def test_onnx_backend_matches_pytorch():
+    pytest.importorskip("onnxruntime")
+    from engine import CATALOG, load_model
+    from engine.depth.onnx import OnnxDepth
+    img = stripes(360, 640)
+    onnx_depth = OnnxDepth(CATALOG["da2-small"]).estimate(img)
+    torch_depth = load_model("da2-small", device="cpu").estimate(img)
+    assert np.corrcoef(onnx_depth.ravel(), torch_depth.ravel())[0, 1] > 0.999
+
+
+@pytest.mark.model
 def test_real_default_model_depth_is_sane():
     from engine import load_model
     img = stripes(360, 640)

@@ -372,10 +372,14 @@ class Any2VRApp(ctk.CTk, *DND_BASES):
 
     def _update_model_hint(self):
         info = CATALOG[MODELS.get(self.model_var.get(), DEFAULT_MODEL)]
-        slow_on_cpu = info.speed == "slow" and not self.report.has_gpu and self.report.device_label.startswith("CPU")
-        text = f"{info.blurb} ~{info.download_mb} MB, runs privately on this PC."
-        if slow_on_cpu:
-            text += " Very slow without a GPU: fine for a few photos, not for video."
+        text = f"{info.blurb} ~{info.download_mb} MB, runs privately on this PC"
+        slow_on_cpu = False
+        if self.report.backend:  # hardware known
+            on_gpu = self.report.runs_on_gpu(info)
+            slow_on_cpu = info.speed == "slow" and not on_gpu
+            text += ", GPU-accelerated." if on_gpu else ", on the CPU."
+            if slow_on_cpu:
+                text += " Very slow here: fine for a few photos, not for video."
         self.model_hint.configure(text=text, text_color=t.WARN if slow_on_cpu else t.MUTED)
 
     def _set_busy(self, busy):

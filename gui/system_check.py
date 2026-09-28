@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 CUDA_TORCH_CMD = "pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128"
 FFMPEG_CMD = "winget install Gyan.FFmpeg"
+DIRECTML_CMD = "pip uninstall -y onnxruntime; pip install onnxruntime-directml"
 VIRTUAL_ADAPTERS = ("virtual", "basic display", "basic render", "remote display", "parsec", "citrix")
 ENCODER_VENDORS = {"hevc_nvenc": "NVIDIA", "hevc_amf": "AMD", "hevc_qsv": "Intel"}
 
@@ -25,9 +26,14 @@ class Issue:
 @dataclass
 class SystemReport:
     device_label: str = "Checking hardware..."
-    has_gpu: bool = False            # the AI runs on a GPU
+    backend: str = ""                # engine device: cuda | mps | dml | cpu
+    has_gpu: bool = False            # the default model's AI runs on a GPU
     encoder: str = ""                # human label for video encoding, e.g. "AMD GPU"
     issues: list = field(default_factory=list)
+
+    def runs_on_gpu(self, model_info) -> bool:
+        """DirectML only accelerates models that ship an ONNX export; CUDA/Metal accelerate all."""
+        return self.backend in ("cuda", "mps") or (self.backend == "dml" and bool(model_info.onnx))
 
 
 def _display_adapters() -> list:
@@ -55,9 +61,9 @@ def _gpu_issue(adapters: list):
     other = next((a for a in adapters if any(v in a.lower() for v in ("amd", "radeon", "intel", "arc"))), "")
     if other:
         return Issue(
-            f"The AI runs on your CPU ({other} not supported yet)",
-            f"Any2VR's AI accelerates on NVIDIA and Apple GPUs today. Your {other} still speeds up video encoding. "
-            "Photos convert fine; long videos will be slow. Depth Anything V2 Small is the fastest model here.")
+            f"Your {other} isn't being used for AI",
+            "Install ONNX Runtime with DirectML to run Depth Anything V2 Small on your GPU (about 30× faster), "
+            "then restart Any2VR.", DIRECTML_CMD)
     return Issue(
         "Running on CPU",
         "No supported GPU was found. Photos convert fine; long videos will be slow. "
@@ -68,10 +74,20 @@ def check() -> SystemReport:
     from engine.depth import device_label, pick_device  # imports torch: keep off the UI thread
     from engine.media import hardware_encoder
 
-    report = SystemReport(device_label=device_label())
-    report.has_gpu = pick_device() != "cpu"
-    if not report.has_gpu:
-        report.issues.append(_gpu_issue(_display_adapters()))
+    report = SystemReport(device_label=device_label(), backend=pick_device())
+    report.has_gpu = report.backend != "cpu"
+    if report.backend in ("dml", "cpu"):
+        adapters = _display_adapters()
+        if report.backend == "dml":
+            report.device_label = f"{adapters[0] if adapters else 'GPU'} · DirectML"
+            nvidia = next((a for a in adapters if "nvidia" in a.lower()), "")
+            if nvidia:  # works via DirectML, but CUDA is faster and accelerates every model
+                report.issues.append(Issue(
+                    f"Get more speed from your {nvidia}",
+                    "The fast model already uses your GPU via DirectML. Installing PyTorch with CUDA makes it faster "
+                    "and also accelerates the slow, high-quality models.", CUDA_TORCH_CMD))
+        else:
+            report.issues.append(_gpu_issue(adapters))
 
     if shutil.which("ffmpeg") is None:
         report.issues.append(Issue(
