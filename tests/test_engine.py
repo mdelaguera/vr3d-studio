@@ -138,7 +138,7 @@ def test_video_sample_range_and_progress(tmp_path):
     seen = []
     ok = Converter(BlobDepth()).convert_video(
         str(src), str(dst), StereoSettings(), OutputSettings(OutputFormat.SBS_HALF),
-        start_frame=4, max_frames=10, prefer_nvenc=False, progress=seen.append)
+        start_frame=4, max_frames=10, prefer_hardware=False, progress=seen.append)
     assert ok and seen[-1].done == 10
     with media.VideoReader(str(dst)) as r:
         assert r.size == (160, 120) and r.frame_count == 10
@@ -151,7 +151,7 @@ def test_video_cancel_leaves_no_files(tmp_path):
     _make_video(src)
     cancel = threading.Event()
     ok = Converter(BlobDepth()).convert_video(
-        str(src), str(dst), StereoSettings(), OutputSettings(), prefer_nvenc=False,
+        str(src), str(dst), StereoSettings(), OutputSettings(), prefer_hardware=False,
         progress=lambda p: cancel.set() if p.done == 3 else None, cancel=cancel)
     assert not ok
     assert sorted(os.listdir(tmp_path)) == ["in.mp4"]

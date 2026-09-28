@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Fixed focus plane 0.1-0.9 (default: automatic focus on the subject)")
     p.add_argument("--fov", type=float, default=110.0, help="VR180 field of view in degrees")
     p.add_argument("--swap-eyes", action="store_true")
-    p.add_argument("--no-nvenc", action="store_true", help="Encode on the CPU (libx264) instead of NVIDIA NVENC")
+    p.add_argument("--no-hw-encode", "--no-nvenc", dest="no_hw_encode", action="store_true", help="Encode on the CPU instead of the GPU (NVIDIA/AMD/Intel)")
     p.add_argument("--no-smoothing", "--no-temporal", action="store_true", help="Disable video depth smoothing")
     p.add_argument("--list-models", action="store_true", help="Show available depth models and their licenses")
     return p
@@ -62,7 +62,7 @@ def main(argv=None) -> int:
     elif is_video(src):
         dst = args.output or output_path_for(src, fmt, ext=".mp4")
         conv.convert_video(src, dst, stereo, output, smooth=not args.no_smoothing,
-                           prefer_nvenc=not args.no_nvenc, progress=_progress)
+                           prefer_hardware=not args.no_hw_encode, progress=_progress)
         print(f"\nSaved {dst}")
     else:
         dst = args.output or output_path_for(src, fmt)

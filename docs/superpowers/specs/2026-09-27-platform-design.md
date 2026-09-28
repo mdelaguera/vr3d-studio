@@ -65,7 +65,7 @@ engine/
   vr180.py         equirectangular projection with cached remap tables
   temporal.py      motion-adaptive depth smoothing with scene-cut reset
   media.py         unicode-safe image IO, prefetching video reader,
-                   threaded ffmpeg writer (probed NVENC), audio mux + stereo metadata
+                   threaded ffmpeg writer (probed GPU encoder), audio mux + stereo metadata
   pipeline.py      Converter: frame / image / video / folder; progress + cancel Event
   cli.py           command line entry
 ```
@@ -105,7 +105,7 @@ Future: Video Depth Anything Small (Apache-2.0) for temporally stable video dept
 ### Video pipeline
 
 Reader thread (prefetch queue) → main thread depth + stereo → writer thread (ffmpeg
-stdin). Encoder chosen by a one-time probe encode (NVENC HEVC → libx264 fallback).
+stdin). Encoder chosen by a one-time probe encode (NVIDIA NVENC → AMD AMF → Intel QSV HEVC → libx264 fallback).
 ffmpeg stderr captured and surfaced on failure. Audio muxed from the source,
 trimmed for samples; stereo metadata flags added; encoded video kept if muxing fails.
 

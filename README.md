@@ -16,13 +16,14 @@ Everything runs on your own computer. No account, no upload, no watermark.
 ## ✨ Features
 
 - 🔒 **Private by design.** Your files never leave your machine.
+- 🩺 **Setup check.** Detects your GPU, PyTorch build, and FFmpeg, and tells you exactly how to fix problems.
 - 🧠 **Open-source depth AI.** Choose between fast and high-quality models, all Apache-2.0.
 - 🎯 **Auto focus.** Anchors the background at screen depth and lets subjects pop forward, avoiding
   ghosted edges and eye strain.
 - 👁️ **Wiggle 3D preview.** See the depth on a normal monitor before you convert.
 - ⚡ **5-second samples.** Render a short clip from any point in a video to check it in your headset.
 - 📁 **Photo albums.** Convert a whole folder in one go; unreadable files are skipped, not fatal.
-- 🎞️ **Fast video pipeline.** Decoding, AI, and encoding run in parallel; NVIDIA NVENC is used
+- 🎞️ **Fast video pipeline.** Decoding, AI, and encoding run in parallel; GPU video encoding (NVIDIA, AMD, Intel) is used
   automatically when available; audio is kept.
 - 🌐 **Headset-ready files.** Output names (`_180_SBS`, `_3DH_SBS`, …) and stereo metadata let
   players detect the layout automatically.
@@ -34,13 +35,15 @@ Everything runs on your own computer. No account, no upload, no watermark.
 1. Install **Python 3.10+** and **FFmpeg** (`winget install Gyan.FFmpeg`).
 2. Get the code:
    ```powershell
-   git clone https://github.com/mdelaguera/vr3d-studio.git
-   cd vr3d-studio
+   git clone https://github.com/mdelaguera/any2vr.git
+   cd any2vr
    ```
-3. Install PyTorch **with CUDA** for GPU speed (pick your CUDA version on [pytorch.org](https://pytorch.org/get-started/locally/)):
+3. **NVIDIA GPU only:** install PyTorch with CUDA first so the AI runs on your GPU
+   (other versions on [pytorch.org](https://pytorch.org/get-started/locally/)):
    ```powershell
    pip install torch --index-url https://download.pytorch.org/whl/cu128
    ```
+   On AMD or Intel graphics, skip this step: the AI runs on the CPU, and video encoding still uses your GPU.
 4. Install the rest: `pip install -r requirements.txt`
 5. Start: double-click `run_converter.bat` or run `python main.py`.
 
@@ -57,7 +60,8 @@ Models download automatically the first time you pick one and are cached by Hugg
 5. **Videos:** scrub to a scene and click **5 s sample** to test before the full render.
 6. **Convert** (`Ctrl+Enter`). `Esc` cancels.
 
-Settings are remembered between sessions.
+On first launch Any2VR checks your setup (GPU, PyTorch, FFmpeg) and explains any fix in plain English.
+Finished files appear under **Recent**; settings are remembered between sessions.
 
 ---
 
@@ -91,7 +95,7 @@ python main.py photo.jpg --model hybrid --strength 0.05
 | `--strength` | 3D strength, default `0.035` ("Natural") |
 | `--focus` | Fixed focus plane 0.1–0.9 (default: automatic) |
 | `--fov` | VR180 field of view, default `110` |
-| `--swap-eyes`, `--no-nvenc`, `--no-smoothing` | Switches |
+| `--swap-eyes`, `--no-hw-encode`, `--no-smoothing` | Switches |
 
 ---
 

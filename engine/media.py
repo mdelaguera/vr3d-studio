@@ -121,13 +121,21 @@ def _ffmpeg() -> str:
     return exe
 
 
-@lru_cache(maxsize=1)
-def nvenc_available() -> bool:
-    """Encoder listed != usable (needs an NVIDIA GPU + driver), so probe with a tiny real encode."""
+# GPU HEVC encoders by vendor, with roughly matched quality settings. First one that works wins.
+HW_ENCODERS = [
+    ("hevc_nvenc", ["-preset", "p4", "-cq", "22"]),                        # NVIDIA
+    ("hevc_amf", ["-quality", "quality", "-rc", "cqp", "-qp_i", "22", "-qp_p", "22"]),  # AMD
+    ("hevc_qsv", ["-global_quality", "22"]),                               # Intel
+]
+CPU_ENCODER = ["-c:v", "libx264", "-crf", "19", "-preset", "fast"]
+
+
+def _encoder_works(name: str) -> bool:
+    """Listed != usable (needs the right GPU + driver), so probe with a tiny real encode."""
     try:
         r = subprocess.run(
             [_ffmpeg(), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1",
-             "-c:v", "hevc_nvenc", "-f", "null", "-"],
+             "-c:v", name, "-f", "null", "-"],
             capture_output=True, timeout=20,
         )
         return r.returncode == 0
@@ -135,22 +143,29 @@ def nvenc_available() -> bool:
         return False
 
 
-def encoder_args(prefer_nvenc: bool = True) -> list:
-    if prefer_nvenc and nvenc_available():
-        return ["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "22", "-tag:v", "hvc1"]
-    return ["-c:v", "libx264", "-crf", "19", "-preset", "fast"]
+@lru_cache(maxsize=1)
+def hardware_encoder() -> str:
+    """Name of the first working GPU encoder on this machine, or '' if none."""
+    return next((name for name, _ in HW_ENCODERS if _encoder_works(name)), "")
+
+
+def encoder_args(prefer_hardware: bool = True) -> list:
+    name = hardware_encoder() if prefer_hardware else ""
+    if name:
+        return ["-c:v", name, *dict(HW_ENCODERS)[name], "-tag:v", "hvc1"]
+    return CPU_ENCODER
 
 
 class VideoWriter:
     """Pipes raw BGR frames into ffmpeg from a background thread (encoding overlaps compute)."""
 
-    def __init__(self, path: str, size, fps: float, prefer_nvenc: bool = True, queue_size: int = 8):
+    def __init__(self, path: str, size, fps: float, prefer_hardware: bool = True, queue_size: int = 8):
         w, h = size
         self.path = path
         self._log = tempfile.TemporaryFile()
         cmd = [_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", f"{fps}", "-i", "-",
-               *encoder_args(prefer_nvenc), "-pix_fmt", "yuv420p", path]
+               *encoder_args(prefer_hardware), "-pix_fmt", "yuv420p", path]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self._log)
         self._q = queue.Queue(maxsize=queue_size)
         self._error = None

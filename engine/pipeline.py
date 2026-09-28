@@ -82,7 +82,7 @@ class Converter:
         media.write_image(dst, self.render_frame(media.read_image(src), stereo, output))
 
     def convert_video(self, src: str, dst: str, stereo: StereoSettings, output: OutputSettings, *,
-                      smooth: bool = True, prefer_nvenc: bool = True, start_frame: int = 0,
+                      smooth: bool = True, prefer_hardware: bool = True, start_frame: int = 0,
                       max_frames: int = None, progress: ProgressFn = None,
                       cancel: threading.Event = None) -> bool:
         """Returns False if cancelled. The output keeps the source audio for the rendered range."""
@@ -105,7 +105,7 @@ class Converter:
                             depth = smoother(frame, depth)
                         out = self.render_frame(frame, stereo, output, depth=depth)
                         if writer is None:  # size known after the first frame
-                            writer = media.VideoWriter(temp, (out.shape[1], out.shape[0]), reader.fps, prefer_nvenc)
+                            writer = media.VideoWriter(temp, (out.shape[1], out.shape[0]), reader.fps, prefer_hardware)
                         writer.write(out)
                         done += 1
                         if progress:
